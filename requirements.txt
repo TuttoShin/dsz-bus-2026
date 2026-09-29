@@ -1,0 +1,4 @@
+pandas>=2.0
+pyarrow>=14.0
+pyproj>=3.6
+openpyxl>=3.1
