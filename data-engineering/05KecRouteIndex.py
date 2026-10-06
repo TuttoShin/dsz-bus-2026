@@ -2,7 +2,7 @@
 # 안심구역에서...
 
 """
-05_kec_route_index.py
+05KecRouteIndex.py
 
 한국도로공사/KOTI 차량통행지표에서 9401이 지나는 경부선 구간만
 도로명+행정구역으로 필터링하고, 노선 단위 혼잡 노출 지수로 압축한다.
@@ -31,8 +31,8 @@ SIGUNGU_NAME 단위로도 별도 breakdown을 남겨서(그룹별 표), 나중�
 정확한 1:1 매핑(어느 시군구가 상행이고 어느 게 하행인지)은 안심구역에서 실제 행정구역 순서를 보고 사람이 판단해야 한다.
 
 CLI 예시:
-  python data-engineering/05_kec_route_index.py --list-only
-  python data-engineering/05_kec_route_index.py --road-names 경부고속도로 --sigungu-names 성남시분당구 서초구
+  python data-engineering/05KecRouteIndex.py --list-only
+  python data-engineering/05KecRouteIndex.py --road-names 경부고속도로 --sigungu-names 성남시분당구 서초구
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
@@ -53,7 +54,16 @@ SIGUNGU_NAME_CANDIDATES: list[str] = ["성남시분당구", "서초구"]
 # %%
 def load_road_indicator(path: Path) -> pd.DataFrame:
     """EX_011 차량통행지표 로드"""
-    return pd.read_csv(path, encoding="utf-8")
+    df = pd.read_csv(path, encoding="utf-8")
+    rename_map = {
+        "road_name": "ROAD_NAME",
+        "velocity_AVRG_CG": "velocity_CG_AVRG",
+        "sigungu_name": "SIGUNGU_NAME",
+        "road_length": "ROAD_LENGTH",
+        "lev5_5_link_id": "LEVEL5_5_LINKID",
+    }
+    df = df.rename(columns=rename_map)
+    return df
 
 
 # %%
@@ -137,6 +147,93 @@ def breakdown_by_sigungu(segments: pd.DataFrame) -> pd.DataFrame:
 
 
 # %%
+# ---------------------------------------------------------------------
+# 정류장별 혼잡 지수
+# 노선 단위 지수는 숫자 하나라 정류장끼리 비교가 안 된다.
+# 그래서 정류장이 있는 동(02b번 결과)의 도로만 골라 같은 방식으로 정류장마다 지수를 만든다.
+#
+# 1. 정류장마다 도로 고르기: 시도 + 시군구 + 읍면동(EMD_NAME)이 모두 같은 링크
+#    동 이름 표기가 달라서 하나도 안 걸리면 -> 그 시군구 전체 도로로 대신 (match_level에 표시)
+# 2. TI_CG, FRIN_CG 0~1 변환은 11개 정류장 도로를 모두 합친 범위로 한다
+#    (정류장마다 따로 하면 정류장끼리 비교가 안 됨)
+# 3. stop_congestion_index = 세 지표 평균을 도로 길이로 가중평균 x 100  (노선 단위와 같은 공식)
+# ---------------------------------------------------------------------
+def _norm_name(s: pd.Series) -> pd.Series:
+    """동 이름 비교용: 공백, 가운뎃점, 마침표 제거 ("종로1·2·3·4가동" = "종로1.2.3.4가동")."""
+    return s.astype(str).str.replace(r"[\s·.,ㆍ]", "", regex=True)
+
+
+def select_stop_links(
+    road_df: pd.DataFrame, stop: pd.Series, emd_override: dict | None = None
+) -> tuple[pd.DataFrame, str]:
+    """한 정류장 주변 도로 링크와 매칭 수준.
+
+    순서대로 시도해서 먼저 걸리는 걸 쓴다
+    1. stop_emd_override에 직접 적은 EMD_NAME
+    2. 동 코드: EMD_CODE == 행정동 코드(10자리 또는 8자리)
+    3. 동 이름: EMD_NAME == 행정동 이름
+    4. 다 안 걸리면 그 시군구 전체 도로
+    """
+    in_sgg = road_df[(road_df["SIDO_NAME"] == stop["sido_nm"]) & (road_df["SIGUNGU_NAME"] == stop["sgg_nm"])]
+    override = (emd_override or {}).get(int(stop["seq"]))
+    if override:
+        hit = in_sgg[_norm_name(in_sgg["EMD_NAME"]).isin(_norm_name(pd.Series(override)))]
+        if not hit.empty:
+            return hit, "읍면동(직접 지정)"
+    codes = {str(stop.get("adm_cd") or ""), str(stop.get("adm_cd") or "")[:8]} - {""}
+    hit = in_sgg[in_sgg["EMD_CODE"].astype(str).isin(codes)]
+    if not hit.empty:
+        return hit, "읍면동(코드)"
+    hit = in_sgg[_norm_name(in_sgg["EMD_NAME"]) == _norm_name(pd.Series([stop["dong_nm"]]))[0]]
+    if not hit.empty:
+        return hit, "읍면동(이름)"
+    return in_sgg, "시군구(동 불일치)"
+
+
+def compute_stop_congestion_index(
+    road_df: pd.DataFrame, stop_dong: pd.DataFrame, emd_override: dict | None = None
+) -> pd.DataFrame:
+    selected = {}
+    for _, stop in stop_dong.iterrows():
+        links, level = select_stop_links(road_df, stop, emd_override)
+        if not level.startswith("읍면동"):
+            print(f"⚠ seq{stop['seq']} {stop['stop_name']}: '{stop['dong_nm']}' 도로 없음 -> {stop['sgg_nm']} 전체로 대신")
+        selected[stop["seq"]] = (links, level)
+
+    # 2. 11개 정류장 도로를 합친 범위로 TI_CG, FRIN_CG를 0~1로
+    pool = pd.concat([l for l, _ in selected.values()]).drop_duplicates("LEVEL5_5_LINKID")
+    ti_norm = dict(zip(pool["LEVEL5_5_LINKID"], _minmax(pool["TI_CG"])))
+    frin_norm = dict(zip(pool["LEVEL5_5_LINKID"], _minmax(pool["FRIN_CG"])))
+
+    rows = []
+    for _, stop in stop_dong.iterrows():
+        links, level = selected[stop["seq"]]
+        row = {"seq": stop["seq"], "stop_name": stop["stop_name"], "sgg_nm": stop["sgg_nm"],
+               "dong_nm": stop["dong_nm"], "match_level": level, "n_links": len(links)}
+        if links.empty:
+            row.update({"road_length_sum_m": np.nan, "speed_drop_ratio_wavg": np.nan, "stop_congestion_index": np.nan})
+        else:
+            w = links["ROAD_LENGTH"]
+            sdr = 1 - links["velocity_CG_AVRG"] / links["velocity_AVRG_NRMLT"]
+            comp = (sdr + links["LEVEL5_5_LINKID"].map(ti_norm) + links["LEVEL5_5_LINKID"].map(frin_norm)) / 3
+            row.update({
+                "road_length_sum_m": float(w.sum()),
+                "speed_drop_ratio_wavg": float((sdr * w).sum() / w.sum()),
+                "stop_congestion_index": float((comp * w).sum() / w.sum() * 100),
+            })
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# %%
+def list_emd_names(road_df: pd.DataFrame, stop_dong: pd.DataFrame) -> pd.DataFrame:
+    """정류장이 있는 시군구들의 EMD_NAME 목록. 동 이름 표기가 다를 때 RunAll.py의 stop_emd_override를 채우는 용도."""
+    sgg = stop_dong["sgg_nm"].dropna().unique()
+    d = road_df[road_df["SIGUNGU_NAME"].isin(sgg)]
+    return d.groupby(["SIGUNGU_NAME", "EMD_NAME"]).size().rename("n_links").reset_index()
+
+
+# %%
 def main() -> None:
     parser = argparse.ArgumentParser(description="9401 경유 경부선 구간 혼잡 노출 지수")
     parser.add_argument("--road-indicator-file", type=str, default="TB_KOTI_ROAD TRAFFIC INDICATOR.csv")
@@ -146,9 +243,21 @@ def main() -> None:
         "--list-only", action="store_true",
         help="필터 없이 ROAD_NAME과 (있다면) 그 도로가 지나는 SIGUNGU_NAME 목록만 출력",
     )
+    parser.add_argument("--by-stop", action="store_true", help="정류장별 혼잡 지수 (02b번 stop_dong 필요)")
+    parser.add_argument("--list-emd", action="store_true", help="정류장 시군구의 EMD_NAME 목록 출력")
     args = parser.parse_args()
 
     road_df = load_road_indicator(RAW_DIR / args.road_indicator_file)
+
+    if args.by_stop or args.list_emd:
+        stop_dong = pd.read_parquet(PROCESSED_DIR / "stop_dong_9401.parquet")
+        if args.list_emd:
+            print(list_emd_names(road_df, stop_dong).to_string(index=False))
+            return
+        by_stop = compute_stop_congestion_index(road_df, stop_dong)
+        print(by_stop.round(3).to_string(index=False))
+        by_stop.to_parquet(PROCESSED_DIR / "kec_stop_index_9401.parquet", index=False)
+        return
 
     if args.list_only:
         print("[ROAD_NAME 상위 빈도]")

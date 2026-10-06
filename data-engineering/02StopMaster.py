@@ -1,9 +1,9 @@
 # 서울시 버스정류장 좌표 변환
 
 """
-02_stop_master.py
+02StopMaster.py
 
-01_ingest_bus.py의 결과(표준버스정류장ID / 버스정류장ARS번호가 있는 테이블)에
+01IngestBus.py의 결과(표준버스정류장ID / 버스정류장ARS번호가 있는 테이블)에
 정류장 위도/경도 좌표를 덧붙여 정류장 테이블을 만든다.
 
 좌표 출처: 서울 열린데이터광장 서울시 버스정류소 위치정보
@@ -15,7 +15,7 @@
 좌표계는 위도/경도를 UTM-K로 변환한다.
 SKT 유동인구 데이터가 UTM-K 격자를 쓰기 때문에 이 스크립트에서 미리 맞춰둔다.
 
-CLI: python data-engineering/02_stop_master.py --route 9401
+CLI: python data-engineering/02StopMaster.py --route 9401
 """
 
 from __future__ import annotations

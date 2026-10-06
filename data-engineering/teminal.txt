@@ -1,0 +1,21 @@
+[안심구역 밖 - 리허설]
+python RunAll.py --dummy          # 가짜 SKT/도로공사 데이터로 01~10 전체 실행. exportDummy/ 생성되면 OK
+
+[반입] 파일 이름에 언더바(_) 있으면 반입 불가
+- 레포 전체 (data/ 폴더 제외)
+- 공개 데이터 3개 -> 안에서 data/raw/ 에 넣기 (이름에서 언더바 빼둘 것)
+    2026년버스노선별정류장별시간대별승하차인원정보(08월).csv
+    서울시버스정류소위치정보(20260902).xlsx
+    HangJeongDongVer20260701.geojson
+
+[안심구역 안 - 노트북 셀 기준 (터미널이면 %run -> python)]
+1. SKT/도로공사 원본 파일을 data/raw/ 에 복사, RunAll.py CONFIG의 파일명(flow_file, wkdy_file, road_file), std_ym 확인
+2. %run data-engineering/05KecRouteIndex.py --list-only
+   -> 경부고속도로가 지나는 시군구 중 9401 경유 구간을 CONFIG의 sigungu_names에 채움
+3. %run RunAll.py
+4. 정류장별 혼잡 지수에 '시군구(동 불일치)'가 보이면
+   %run data-engineering/05KecRouteIndex.py --list-emd
+   -> 도로공사 EMD_NAME 표기를 보고 CONFIG의 stop_emd_override에 채운 뒤 3번 다시
+
+반출 신청: export/ 폴더만 (ExportManifest.md 첨부)
+반출 금지: data/processed/ 전체, run_log.txt
