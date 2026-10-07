@@ -71,11 +71,12 @@ def merge_route_share(df: pd.DataFrame, route_share: pd.DataFrame | None) -> pd.
     """03b 노선 분담률을 (표준버스정류장ID, hour)로 붙인다. 파일이 없으면 NaN 컬럼만 만든다."""
     df = df.copy()
     if route_share is None:
-        print("route_share 없음 -> share_all/share_express NaN (09번은 분담률 없는 신호만 사용)")
+        print("route_share 없음 -> 분담률 컬럼 NaN (09번은 분담률 없는 신호만 사용)")
+        df["share_all_stop"] = np.nan
         df["share_all"] = np.nan
         df["share_express"] = np.nan
         return df
-    rs = route_share[["표준버스정류장ID", "hour", "share_all", "share_express", "n_routes"]].copy()
+    rs = route_share[["표준버스정류장ID", "hour", "share_all_stop", "share_all", "share_express", "n_routes"]].copy()
     rs["표준버스정류장ID"] = rs["표준버스정류장ID"].astype(str)
     if "표준버스정류장ID" not in df.columns:
         raise KeyError("load_profile에 표준버스정류장ID가 없습니다. 03LoadProfile.py 산출물을 확인하세요.")

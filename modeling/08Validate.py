@@ -7,7 +7,8 @@
 
 1. cv_ablation: SKT 데이터를 넣으면 예측이 더 정확해지는가
    - 자리가 넉넉했던 칸(실제 승차 = 수요)을 5등분해서, 4개로 학습하고 1개로 맞춰보기를 5번 반복
-   - 비교: no_skt / flow / flow_x_share / flow_x_share + 통근 보정
+   - 비교: no_skt / flow / flow_x_share_hourly / flow_x_share / flow_x_share + 통근 보정
+     (flow와 flow_x_share는 정류장 고정 분담률이라 결과가 같게 나오는 게 정상)
    - no_skt보다 오차가 작으면 = SKT 데이터가 도움이 된다
    - 통근 보정을 넣어서 오차가 더 작아지면 = 직장인 비중 반영이 도움이 된다 (PPT 17쪽 근거)
 
@@ -53,6 +54,7 @@ def _poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
 CV_VARIANTS = [  # (표에 쓸 이름, 수요신호, 통근 보정)
     ("no_skt", "no_skt", False),
     ("flow", "flow", False),
+    ("flow_x_share_hourly", "flow_x_share_hourly", False),
     ("flow_x_share", "flow_x_share", False),
     ("flow_x_share+통근", "flow_x_share", True),
 ]

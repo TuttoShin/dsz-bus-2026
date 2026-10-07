@@ -75,7 +75,7 @@ CONFIG = {
     "headway_max": 7,
     "tau": 0.6,  # 좌석의 60% 이하로 찼으면 "자리가 넉넉했다"로 봄
     "taus": [0.5, 0.6, 0.7],  # 08번에서 비교할 tau
-    "signal": "flow_x_share",  # 수요신호 = 유동인구 x 9401 분담률
+    "signal": "flow_x_share",  # 수요신호 = 유동인구 x 9401 분담률(정류장마다 하루 전체로 한 번 계산)
     "use_commute": True,  # 통근 보정: 요일별 유동인구로 직장인 비중 반영 (출퇴근 시간대만)
     # 07번 가중합 점수의 가중치 (09번과 비교용)
     "rule_weights": {"w_load": 0.35, "w_flow": 0.4, "w_congestion": 0.25},

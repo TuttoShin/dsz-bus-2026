@@ -1,4 +1,4 @@
-# 복수 노선 정류장에서 9401 몫(분담률) 계산 — 공개 데이터라 안심구역 밖에서 실행
+# 복수 노선 정류장에서 9401 몫(분담률) 계산 (공개 데이터. RunAll.py가 안심구역 안에서 실행)
 """
 03bRouteShare.py
 
@@ -9,8 +9,15 @@
 그래서 같은 정류장·시간대의 서울 버스 전체 승차 중 9401이 차지하는 비중(분담률)을
 공개 승하차 데이터로 계산해둔다. 09번 모델에서 유동인구 x 분담률을 '9401 대기 수요 신호'로 쓴다.
 
-  share_all     = 9401 승차 / 그 정류장·시간대 서울 버스 전체 승차
-  share_express = 9401 승차 / 그 정류장·시간대 광역버스 승차
+  share_all_stop = 9401 하루 승차 합계 / 그 정류장 서울 버스 하루 승차 합계  (정류장마다 값 하나, 09번 기본값)
+  share_all      = 9401 승차 / 그 정류장·시간대 서울 버스 전체 승차      (시간대별, 08번 비교용)
+  share_express  = 9401 승차 / 그 정류장·시간대 광역버스 승차
+
+왜 정류장마다 값 하나(share_all_stop)를 쓰는가)
+시간대별 분담률은 9401이 꽉 차서 못 탄 시간대에 낮게 나온다 (못 탄 사람은 승차에 안 잡히니까).
+그러면 수요를 복원해야 하는 바로 그 시간대에 수요신호가 작아진다 (순환 문제).
+정류장마다 하루 전체로 한 번만 계산하면 이 문제가 없다.
+(09번 모델에서는 정류장마다 고정된 비율이 정류장 계수에 흡수돼서, 비율 크기가 틀려도 탑승확률은 바뀌지 않음)
 
 한계)
 서울시 데이터라 같은 정류장에 서는 경기도 버스 승차는 분모에 들어가지 않는다 -> 분담률 과대 추정 가능.
@@ -58,6 +65,11 @@ def build_route_share(bus_long_all: pd.DataFrame, route: str) -> pd.DataFrame:
     # 분모가 0이면 분담률 정의 불가 -> NaN (09번에서 정류장 평균 분담률로 대체)
     out["share_all"] = out["board_route"] / out["board_all"].where(out["board_all"] > 0)
     out["share_express"] = out["board_route"] / out["board_express"].where(out["board_express"] > 0)
+
+    # 정류장마다 하루 전체 합계로 한 번만 계산한 분담률
+    daily = out.groupby("표준버스정류장ID")[["board_route", "board_all"]].sum()
+    stop_share = (daily["board_route"] / daily["board_all"].where(daily["board_all"] > 0)).rename("share_all_stop")
+    out = out.merge(stop_share.reset_index(), on="표준버스정류장ID", how="left")
     return out.sort_values(key).reset_index(drop=True)
 
 

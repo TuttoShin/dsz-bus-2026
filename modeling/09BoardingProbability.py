@@ -13,7 +13,7 @@
        log(하루 평균 승차 인원) = log(수요신호) + 정류장 계수 + 시간대 계수
                                  + 오전 통근 계수 x 통근 비율 x [7~9시]
                                  + 오후 통근 계수 x 통근 비율 x [17~19시]
-       수요신호 = 주변 유동인구 x 9401 분담률   (복수 노선 정류장에서 9401 몫만)
+       수요신호 = 주변 유동인구 x 9401 분담률   (복수 노선 정류장에서 9401 몫만, 정류장마다 값 하나)
        통근 비율 = (평일 유동인구 - 주말 유동인구) / 평일 유동인구   (0~1, 요일별 데이터)
    - 버스가 꽉 찼던 칸에 이 식을 적용하면 "자리만 있었으면 탔을 인원"이 나온다
    - 못 탄 인원(unmet) = 원래 타려던 인원 - 실제 탄 인원
@@ -37,7 +37,12 @@
 수요신호 종류 (08번에서 서로 비교)
    no_skt       : SKT 안 씀. 정류장 계수 x 시간대 계수만 (비교 기준)
    flow         : 주변 유동인구 그대로
-   flow_x_share : 주변 유동인구 x 9401 분담률 (기본값)
+   flow_x_share        : 주변 유동인구 x 9401 분담률(정류장마다 하루 전체로 한 번 계산) (기본값)
+   flow_x_share_hourly : 주변 유동인구 x 9401 분담률(시간대별) (비교용)
+                         9401이 꽉 찬 시간대엔 못 탄 사람이 승차에 안 잡혀 분담률이 낮게 나옴
+                         -> 수요를 복원해야 할 시간대에 신호가 작아지는 순환 문제가 있어서 기본값에서 뺌
+   참고: 정류장마다 고정된 분담률은 정류장 계수에 흡수돼서 탑승확률은 flow와 똑같이 나온다.
+         즉 분담률의 크기(서울역 = 1/20 등)가 정확하지 않아도 결과는 흔들리지 않는다.
 
 통근 보정 (use_commute, PPT 17쪽)
    SKT의 거주/직장/방문 인구 구분은 "서비스인구" 데이터에만 있고, 우리 데이터(유동인구)에는 없다.
@@ -74,7 +79,7 @@ HEADWAY_MIN_DEFAULT = 3
 HEADWAY_MAX_DEFAULT = 7
 TAU_DEFAULT = 0.6
 SIGNAL_DEFAULT = "flow_x_share"
-SIGNAL_VARIANTS = ["no_skt", "flow", "flow_x_share"]
+SIGNAL_VARIANTS = ["no_skt", "flow", "flow_x_share", "flow_x_share_hourly"]
 COMMUTE_BANDS = ["오전첨두", "오후첨두"]  # 통근 보정이 작동하는 시간대
 MAX_EXTRA_WAIT_MIN = 60.0
 GRADE_THRESHOLDS = {"여유": 0.9, "보통": 0.7}  # 확률 0.9 이상 여유 / 0.7~0.9 보통 / 0.7 미만 위험
@@ -128,12 +133,13 @@ def add_demand_signal(df: pd.DataFrame, variant: str) -> pd.DataFrame:
         sig = pd.Series(1.0, index=df.index)
     else:
         sig = df["flow_pop"].astype(float)
-        if variant.endswith("_x_share"):
-            if df["share_all"].notna().sum() == 0:
-                raise ValueError("share_all이 전부 결측 — 03bRouteShare.py 산출물을 확인하세요.")
-            # 분담률이 빈 칸은 그 정류장의 평균 분담률로 채움
-            share = df["share_all"].fillna(df.groupby("seq")["share_all"].transform("mean"))
-            share = share.fillna(df["share_all"].mean())
+        if "_x_share" in variant:
+            col = "share_all" if variant.endswith("_hourly") else "share_all_stop"
+            if col not in df or df[col].notna().sum() == 0:
+                raise ValueError(f"{col}이 전부 결측 — 03bRouteShare.py 산출물을 확인하세요.")
+            # 분담률이 빈 칸은 그 정류장의 평균 분담률로, 그래도 없으면 전체 평균으로 채움
+            share = df[col].fillna(df.groupby("seq")[col].transform("mean"))
+            share = share.fillna(df[col].mean())
             sig = sig * share
         # 계산에 log를 쓰므로 0이 있으면 안 됨 -> 아주 작은 값(중앙값의 1%)으로 바꿔둔다
         floor = max(float(sig[sig > 0].median()) * 0.01, 1e-6) if (sig > 0).any() else 1e-6
