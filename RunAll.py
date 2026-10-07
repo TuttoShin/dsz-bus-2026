@@ -11,7 +11,7 @@ RunAll.py
   - data/raw/ 에 넣을 공개 데이터 3개 (이름에서 언더바를 빼둘 것)
       2026년버스노선별정류장별시간대별승하차인원정보(08월).csv   (서울 열린데이터광장)
       서울시버스정류소위치정보(20260902).xlsx                     (서울 열린데이터광장)
-      HangJeongDongVer20260701.geojson                           (github.com/vuski/admdongkor)
+      HangJeongDongSeoulVer20260701.csv                          (github.com/vuski/admdongkor 경계를 CSV로 변환)
   - SKT, 도로공사 데이터는 안심구역에 있는 파일을 data/raw/ 에 복사해서 씀
 
 [안심구역 밖에서 리허설]
@@ -54,7 +54,7 @@ CONFIG = {
     # 공개 데이터 (반입)
     "bus_file": "2026년버스노선별정류장별시간대별승하차인원정보(08월).csv",
     "coord_file": "서울시버스정류소위치정보(20260902).xlsx",
-    "boundary_file": "HangJeongDongVer20260701.geojson",
+    "boundary_file": "HangJeongDongSeoulVer20260701.csv",  # 행정동 경계 (geojson은 반입 불가라 CSV로 변환해 감)
     # SKT
     "flow_file": "seoul_flow_time.csv",  # SKT_003 시간대별
     "wkdy_file": "seoul_flow_wkdy.csv",  # SKT_002 요일별 (통근 보정용)
