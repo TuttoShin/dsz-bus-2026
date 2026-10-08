@@ -1,5 +1,5 @@
 """
-01_ingest_bus.py
+01IngestBus.py
 
 서울 열린데이터광장 "버스노선별_정류장별_시간대별_승하차_인원_정보" 공공데이터
 원본 CSV를 읽고, 다음 전처리를 수행한다.
@@ -11,7 +11,7 @@
 5. data/processed/ 에 parquet으로 저장
 
 Jupyter: VSCode에서는 # %% 블록 단위로 인터랙티브 실행 가능
-CLI: python data-engineering/01_ingest_bus.py --route 9401
+CLI: python data-engineering/01IngestBus.py --route 9401
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def main() -> None:
     parser.add_argument(
         "--raw-file",
         type=str,
-        default="2026년_버스노선별_정류장별_시간대별_승하차_인원_정보(08월).csv",
+        default="2026년버스노선별정류장별시간대별승하차인원정보(08월).csv",
         help="data/raw/ 아래 원본 CSV 파일명",
     )
     parser.add_argument(

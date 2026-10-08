@@ -11,3 +11,9 @@ venv/
 # OS / editor
 .DS_Store
 .vscode/
+# 반출 결과물 (안심구역 산출물, 반출 승인 후 별도 관리)
+export/
+exportDummy/
+
+# API 인증키 (절대 커밋 X, 안심구역 반입 X)
+.env

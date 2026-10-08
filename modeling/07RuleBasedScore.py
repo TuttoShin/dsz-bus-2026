@@ -1,11 +1,14 @@
 """
-07_rule_based_score.py
+07RuleBasedScore.py
 
-data_engineering/06_build_features.py 산출물(data/processed/features.parquet)에서
+data_engineering/06BuildFeatures.py 산출물(data/processed/features.parquet)에서
 재차(03) / 유동인구(04) / 혼잡지수(05) 세 신호를 정규화 후 가중합해서
 "탑승 여유 지수(boarding_margin_index)"를 산출한다.
 
-여기서부터는 가중치/정규화 방식 적용. features.parquet만 있으면 안심구역 밖에서 얼마든지 반복 실험 가능
+여기서부터는 가중치/정규화 방식 적용.
+features.parquet은 반출이 안 되므로 이 파일도 안심구역 안에서 RunAll.py로 돌린다.
+가중치(0.35/0.4/0.25)에 근거가 없어서 최종 결과로는 09번 확률을 쓰고,
+이 점수는 09번과 순위가 비슷하게 나오는지 비교하는 용도로만 쓴다(08번).
 
 로직
 ----
@@ -18,10 +21,11 @@ data_engineering/06_build_features.py 산출물(data/processed/features.parquet)
    정류장 주변 수요 압력. 절대값이 아니라 "이 데이터셋 안에서 상대적으로 얼마나
    높은가"이므로, 데이터가 바뀌면(다른 달/다른 노선) 재계산해야 한다.
 
-3. congestion_norm = min-max(congestion_exposure_index)
-   고속도로 구간(성남_상행/하행)에만 값이 있고 도심 구간은 NaN. 결측 그대로 둔다.
+3. congestion_norm = stop_congestion_index / 100
+   05번 정류장별 혼잡 지수(0~100, 정류장이 있는 동의 도로 기준)를 0~1로.
+   정류장별 지수가 없으면 노선 단위 지수(congestion_exposure_index)를 대신 쓴다.
 
-4. burden_index = 가중합. congestion_norm이 NaN인 행(도심 구간)은 그 항을 빼고
+4. burden_index = 가중합. congestion_norm이 NaN인 행은 그 항을 빼고
    나머지 가중치를 합이 1이 되도록 재정규화해서 계산한다. 그냥 0으로 채우면
    "그 구간은 혼잡이 전혀 없다"는 잘못된 신호를 주게 되므로, 아예 그 신호가
    없다는 걸 가중치 재분배로 반영한다.
@@ -32,8 +36,8 @@ data_engineering/06_build_features.py 산출물(data/processed/features.parquet)
 SEAT_CAPACITY는 9401 실제 좌석수 41석!
 
 CLI 예시:
-  python modeling/07_rule_based_score.py --route 9401
-  python modeling/07_rule_based_score.py --route 9401 --seat-capacity 45 --w-load 0.5 --w-flow 0.3 --w-congestion 0.2
+  python modeling/07RuleBasedScore.py --route 9401
+  python modeling/07RuleBasedScore.py --route 9401 --seat-capacity 45 --w-load 0.5 --w-flow 0.3 --w-congestion 0.2
 """
 
 from __future__ import annotations
@@ -72,9 +76,9 @@ def add_normalized_signals(df: pd.DataFrame, seat_capacity: float) -> pd.DataFra
     df["per_bus_avg_mid"] = (df["per_bus_avg_low"] + df["per_bus_avg_high"]) / 2
     df["load_ratio"] = (df["per_bus_avg_mid"] / seat_capacity).clip(upper=1.3)
     df["flow_norm"] = _minmax(df["flow_pop"])
-    # congestion_exposure_index는 05번에서 이미 0~100으로 정규화된 지수이자
-    # 세그먼트당 상수값이라 min-max 대상이 아님, 스케일만 0~1로 맞춘다.
-    df["congestion_norm"] = df["congestion_exposure_index"] / 100.0
+    # 05번에서 이미 0~100 지수라 min-max 하지 않고 스케일만 0~1로
+    stop_idx = df["stop_congestion_index"] if "stop_congestion_index" in df else np.nan
+    df["congestion_norm"] = pd.Series(stop_idx, index=df.index).fillna(df["congestion_exposure_index"]) / 100.0
     return df
 
 
@@ -127,7 +131,7 @@ def lowest_margin(df: pd.DataFrame, segment: str | None = None, top_n: int = 10)
     d = df if segment is None else df[df["segment"] == segment]
     cols = [
         "segment", "stop_label", "seq", "hour", "per_bus_avg_mid", "flow_pop",
-        "congestion_exposure_index", "load_ratio", "flow_norm", "congestion_norm",
+        "stop_congestion_index", "load_ratio", "flow_norm", "congestion_norm",
         "boarding_margin_index", "margin_label",
     ]
     return d.nsmallest(top_n, "boarding_margin_index")[cols]

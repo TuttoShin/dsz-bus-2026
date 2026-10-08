@@ -1,17 +1,17 @@
 # 9401 세그먼트 정의, 정류장/시간대별 재차 상한/하한 계산
 """
-03_load_profile.py
+03LoadProfile.py
 
-02_stop_master.py 산출물(정류장 순번 seq + 서울 좌표 매칭 여부)과
-01_ingest_bus.py 산출물(정류장x시간대 승하차)을 합쳐서,
+02StopMaster.py 산출물(정류장 순번 seq + 서울 좌표 매칭 여부)과
+01IngestBus.py 산출물(정류장x시간대 승하차)을 합쳐서,
 '이 버스가 정류장을 지날 때마다 대략 몇 명이 타고 있었을까'를 추정한다.
 
 핵심 아이디어)
 승하차 데이터는 월간 합계지, 실제 버스 한 대의 실시간 재차인원이 아님!
 그래서 절대적인 인원수가 아니라 두 단계로 나눠 추정한다.
 
-1. 재차 하한(load_lower): seq 순서대로 (승차-하차)를 누적합산
-   -> 절댓값이 아니라 정류장 간 상대적인 격차를 보는 지표
+1. 재차 하한(load_lower): seq 순서대로 (승차-하차)를 누적하되 0 밑으로는 내려가지 않게 끊는다
+   (load_before_board = 하차 후·승차 전 재차, 09번 탑승확률 모델의 '남은 좌석' 계산에 쓰임)
 
 2. 대당 평균 재차 추정 범위(per_bus_avg_low/high): 재차 하한을
    '이 시간대에 실제로 몇 대가 다녔는가'로 나눠서 버스 한 대당 평균으로 환산.
@@ -23,7 +23,7 @@
 stop_master의 좌표 매칭 여부(서울 데이터셋에 있는 정류장인지)로부터 자동으로 경계를 계산
 서울 정류장이 시작되는 seq ~ 끝나는 seq 사이가 도심 구간!!
 
-CLI: python data-engineering/03_load_profile.py --route 9401 --headway-min 3 --headway-max 7 --weekdays 20
+CLI: python data-engineering/03LoadProfile.py --route 9401 --headway-min 3 --headway-max 7 --weekdays 20
 """
 
 
@@ -32,8 +32,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
  
+import numpy as np
 import pandas as pd
- 
+
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
  
  
@@ -50,12 +51,12 @@ def derive_segments(stop_master: pd.DataFrame) -> pd.DataFrame:
     seoul_seqs = stop_master.loc[stop_master["lat"].notna(), "seq"]
     if seoul_seqs.empty:
         raise ValueError(
-            "서울 좌표가 매칭된 정류장이 없습니다. 02_stop_master.py를 먼저 확인하세요."
+            "서울 좌표가 매칭된 정류장이 없습니다. 02StopMaster.py를 먼저 확인하세요."
         )
     seoul_min, seoul_max = seoul_seqs.min(), seoul_seqs.max()
  
     seg = stop_master[["표준버스정류장ID", "seq", "stop_name"]].drop_duplicates().copy()
-    # 02_stop_master.py는 표준버스정류장ID를 문자열로 저장하는데, bus_long(01번 산출물)은
+    # 02StopMaster.py는 표준버스정류장ID를 문자열로 저장하는데, bus_long(01번 산출물)은
     # 정수 그대로다. merge 전에 타입을 맞춰준다 (안 그러면 ValueError 발생).
     seg["표준버스정류장ID"] = seg["표준버스정류장ID"].astype(str)
  
@@ -75,17 +76,49 @@ def derive_segments(stop_master: pd.DataFrame) -> pd.DataFrame:
  
  
 # %%
+def _reflected_cumsum(boarding: np.ndarray, alighting: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """정류장마다 재차를 순서대로 계산. 내리는 사람이 먼저, 타는 사람이 나중.
+
+    재차 = max(0, 이전 정류장 재차 - 하차) + 승차
+    버스 안 인원은 0보다 작을 수 없으니, 하차가 더 많으면 0에서 멈춘다.
+    반환: (하차 후·승차 전 재차, 승차 후 재차)
+    """
+    before = np.zeros(len(boarding))
+    after = np.zeros(len(boarding))
+    load = 0.0
+    for i, (b, a) in enumerate(zip(boarding, alighting)):
+        load = max(0.0, load - a)
+        before[i] = load
+        load += b
+        after[i] = load
+    return before, after
+
+
 def compute_load_lower_bound(bus_long: pd.DataFrame) -> pd.DataFrame:
-    """정류장 seq 순서대로 (승차-하차)를 누적합산 -> 시간대별 재차 하한 추정."""
+    """정류장 seq 순서대로 (승차-하차)를 누적 -> 시간대별 재차 추정.
+
+    예전 방식: 누적합이 음수가 되면 그 시간대 최솟값만큼 노선 전체를 위로 올림
+      -> 8시는 종점(seq1)부터 3,254명이 타고 있는 걸로 나옴 (말이 안 됨)
+    지금 방식: 정류장마다 0 밑으로 안 내려가게 끊어서 누적 (_reflected_cumsum)
+    cum_net(예전 단순 누적합)은 비교용으로 남겨둔다.
+    """
     df = bus_long.sort_values(["hour", "seq"]).copy()
     # merge 시 stop_master(문자열)와 타입을 맞추기 위해 여기서도 문자열로 통일
     df["표준버스정류장ID"] = df["표준버스정류장ID"].astype(str)
     df["net"] = df["boarding"] - df["alighting"]
     df["cum_net"] = df.groupby("hour")["net"].cumsum()
- 
-    # 월간 집계 오차로 음수가 나올 수 있으므로, 시간대별 최솟값만큼 위로 밀어 0 이상으로 보정
-    hour_min = df.groupby("hour")["cum_net"].transform("min")
-    df["load_lower"] = df["cum_net"] - hour_min
+
+    df["load_before_board"] = 0.0
+    df["load_lower"] = 0.0
+    for _, idx in df.groupby("hour").groups.items():
+        before, after = _reflected_cumsum(
+            df.loc[idx, "boarding"].to_numpy(float), df.loc[idx, "alighting"].to_numpy(float)
+        )
+        df.loc[idx, "load_before_board"] = before
+        df.loc[idx, "load_lower"] = after
+    # 시간대별 노선 전체 최대 재차. 09번에서 "최소 몇 대가 다녀야 하나" 계산에 씀
+    # (06번이 성남 구간을 빼기 전에 미리 계산해 둬야 함)
+    df["route_max_load_hour"] = df.groupby("hour")["load_lower"].transform("max")
     return df
  
  
@@ -134,8 +167,9 @@ def build_load_profile(
     profile = add_stop_label(profile) 
 
     cols = [
-        "노선번호", "seq", "stop_name", "stop_label", "segment", "hour", 
-        "boarding", "alighting", "net", "load_lower", "per_bus_avg_low", "per_bus_avg_high",
+        "노선번호", "표준버스정류장ID", "seq", "stop_name", "stop_label", "segment", "hour",
+        "boarding", "alighting", "net", "load_before_board", "load_lower", "route_max_load_hour",
+        "per_bus_avg_low", "per_bus_avg_high",
     ]
     return profile[cols].sort_values(["hour", "seq"]).reset_index(drop=True)
  

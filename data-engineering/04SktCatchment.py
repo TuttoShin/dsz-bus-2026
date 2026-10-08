@@ -2,7 +2,7 @@
 # 안심구역에서....
 
 """
-04_skt_catchment.py
+04SktCatchment.py
 
 SKT 시간대별 유동인구(seoul_flow_time.csv, 50m*50m cell 단위, 서울시 전역)를
 정류장 반경 버퍼로 묶어서, 정류장별/시간대별 주변 유동인구 테이블을 만든다.
@@ -12,7 +12,7 @@ SKT 시간대별 유동인구(seoul_flow_time.csv, 50m*50m cell 단위, 서울�
 반면 이 정류장x시간대 유동인구 테이블은, '그 정류장 주변에 실제로 체류/이동한
 사람이 몇 명이었는가'라는 별개의 축을 제공한다.
 
-03_load_profile.py의 정류장x시간대 승하차(boarding)와 이 파일의 정류장x시간대 유동인구(flow_pop)를 
+03LoadProfile.py의 정류장x시간대 승하차(boarding)와 이 파일의 정류장x시간대 유동인구(flow_pop)를 
 나중에 같은 (표준버스정류장ID, hour) 키로 merge하면,
 주변엔 사람이 많았는데 승차는 안 늘어난 정류장/시간대를 잔차로 잡아낼 수 있다
 -> 미승차 수요 추정의 재료
@@ -23,13 +23,19 @@ SKT 시간대별 유동인구(seoul_flow_time.csv, 50m*50m cell 단위, 서울�
 - TMST_00 ~ TMST_23: 해당 시(hour)의 유동인구 추정치(명, 소수점 있음)
 - 공간 단위: 50m*50m cell (즉 각 좌표는 셀의 대표점)
 
+요일별 유동인구 (SKT_002, seoul_flow_wkdy.csv)
+- FLOW_POP_CNT_MON ~ SUN: 그 달의 요일 평균 유동인구 (화요일만 TUS로 표기)
+- 정류장 반경 안을 같은 방식으로 합산해서 평일 평균(flow_weekday), 주말 평균(flow_weekend)을 만든다
+- 09번에서 통근 비율 = (평일 - 주말) / 평일 로 쓴다
+  (출퇴근하는 사람은 평일에만 있고, 쇼핑·방문하는 사람은 주말에도 있으니까)
+
 반경 파라미터)
 정류장 반경 100~150m를 기본 탐색 범위로 잡는다(50m cell 한 칸~두 칸 정도 커버)
 너무 좁으면(50m 이하) 셀이 안 걸리는 정류장이 생기고, 너무 넓으면(300m+) 
 옆 정류장 수요까지 섞여서 그 정류장 고유의 주변 유동인구라는 의미가 흐려진다.
 --radius-m으로 조정하면서 실제 분포를 보고 정할 것.
 
-CLI: python data-engineering/04_skt_catchment.py --route 9401 --radius-m 150
+CLI: python data-engineering/04SktCatchment.py --route 9401 --radius-m 150
 """
 
 from __future__ import annotations
@@ -44,11 +50,16 @@ RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
 
 FLOW_HOURS = [f"TMST_{h:02d}" for h in range(24)]
+# SKT_002 요일별 유동인구 컬럼 (정의서 표기 그대로. 화요일은 TUS)
+WKDY_COLS = {
+    "MON": "FLOW_POP_CNT_MON", "TUE": "FLOW_POP_CNT_TUS", "WED": "FLOW_POP_CNT_WED",
+    "THU": "FLOW_POP_CNT_THU", "FRI": "FLOW_POP_CNT_FRI", "SAT": "FLOW_POP_CNT_SAT", "SUN": "FLOW_POP_CNT_SUN",
+}
 
 
 # %%
 def load_seoul_stops(route: str) -> pd.DataFrame:
-    """02_stop_master.py 산출물에서 서울 좌표가 매칭된 정류장만 남긴다.
+    """02StopMaster.py 산출물에서 서울 좌표가 매칭된 정류장만 남긴다.
 
     SKT 유동인구는 서울시만 커버하므로, 좌표가 없는(NODE_ID 매칭 실패) 정류장은 애초에 분석 대상 X
     """
@@ -80,6 +91,28 @@ def load_flow_population(flow_path: Path, std_ym: str | None = None) -> pd.DataF
 
 
 # %%
+def _sum_within_radius(
+    stops: pd.DataFrame, cells: pd.DataFrame, value_cols: list[str], radius_m: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """정류장마다 반경 안 셀들의 value_cols 값을 합산. 반환: (정류장별 셀 개수, 정류장 x 컬럼 합계)"""
+    # 서울 전체 셀(수십만 개)과 거리를 다 계산하면 느림 -> 정류장 근처 네모 영역 밖 셀은 미리 버림
+    pad = radius_m + 1
+    in_box = (
+        cells["utmk_x"].between(stops["utmk_x"].min() - pad, stops["utmk_x"].max() + pad)
+        & cells["utmk_y"].between(stops["utmk_y"].min() - pad, stops["utmk_y"].max() + pad)
+    )
+    cells = cells[in_box]
+
+    stop_xy = stops[["utmk_x", "utmk_y"]].to_numpy()
+    cell_xy = cells[["utmk_x", "utmk_y"]].to_numpy()
+    # (정류장 수, 셀 수) 거리 행렬
+    dist = np.sqrt(((stop_xy[:, None, :] - cell_xy[None, :, :]) ** 2).sum(axis=2))
+    within = dist <= radius_m
+    # within(정류장 x 셀) @ 값(셀 x 컬럼) -> 정류장 x 컬럼 합계
+    return within.sum(axis=1), within.astype(float) @ cells[value_cols].to_numpy(float)
+
+
+# %%
 def join_flow_to_stops(
     stops: pd.DataFrame, flow: pd.DataFrame, radius_m: float = 150.0
 ) -> pd.DataFrame:
@@ -93,19 +126,7 @@ def join_flow_to_stops(
     numpy 브로드캐스팅으로 정류장×셀 거리 행렬을 한 번에 계산한다(정류장·셀 수가 각각 수백~수천 단위)
     if. 실제 셀 개수가 훨씬 크면(수만+) 안심구역에서 scipy.spatial.cKDTree로 바꿔서 반경 검색만 빠르게
     """
-    stop_xy = stops[["utmk_x", "utmk_y"]].to_numpy()
-    flow_xy = flow[["utmk_x", "utmk_y"]].to_numpy()
-    flow_vals = flow[FLOW_HOURS].to_numpy()
-
-    # (n_stops, n_cells) 거리 행렬
-    dist = np.sqrt(
-        ((stop_xy[:, None, :] - flow_xy[None, :, :]) ** 2).sum(axis=2)
-    )
-    within = dist <= radius_m  # (n_stops, n_cells)
-
-    n_cells_matched = within.sum(axis=1)
-    # within(bool) x flow_vals(n_cells, 24) -> (n_stops, 24) 합산
-    hourly_sum = within.astype(float) @ flow_vals
+    n_cells_matched, hourly_sum = _sum_within_radius(stops, flow, FLOW_HOURS, radius_m)
 
     result = stops[["표준버스정류장ID", "seq", "stop_name"]].copy()
     result["n_cells_matched"] = n_cells_matched
@@ -139,11 +160,45 @@ def to_long(flow_by_stop: pd.DataFrame) -> pd.DataFrame:
 
 
 # %%
-def build_flow_profile(
-    route: str, flow_file: str, radius_m: float, std_ym: str | None = None
-) -> pd.DataFrame:
+def load_weekday_population(wkdy_path: Path, std_ym: str | None = None) -> pd.DataFrame:
+    """SKT_002 요일별 유동인구 로드. 값은 그 달의 요일 평균 (예: 월요일 합 / 월요일 수)."""
+    df = pd.read_csv(wkdy_path, sep="|", encoding="utf-8", dtype={"STD_YM": str})
+    if std_ym is not None:
+        df = df[df["STD_YM"] == std_ym]
+    df["utmk_x"] = df["X_COORD"].astype(float)
+    df["utmk_y"] = df["Y_COORD"].astype(float)
+    return df
+
+
+def build_weekday_profile(route: str, wkdy: pd.DataFrame, radius_m: float) -> pd.DataFrame:
+    """정류장 반경 안의 요일별 유동인구를 합산해서 평일 평균, 주말 평균을 만든다.
+
+    flow_weekday = (월 + 화 + 수 + 목 + 금) / 5
+    flow_weekend = (토 + 일) / 2
+    통근 비율 같은 파생값은 여기서 만들지 않는다 (09번에서 계산)
+    """
     stops = load_seoul_stops(route)
-    flow = load_flow_population(RAW_DIR / flow_file, std_ym=std_ym)
+    cols = list(WKDY_COLS.values())
+    _, sums = _sum_within_radius(stops, wkdy, cols, radius_m)
+    by_day = pd.DataFrame(sums, columns=list(WKDY_COLS.keys()))
+    out = stops[["표준버스정류장ID", "seq", "stop_name"]].copy()
+    out["flow_weekday"] = by_day[["MON", "TUE", "WED", "THU", "FRI"]].mean(axis=1).to_numpy()
+    out["flow_weekend"] = by_day[["SAT", "SUN"]].mean(axis=1).to_numpy()
+    return out.reset_index(drop=True)
+
+
+# %%
+def build_flow_profile(
+    route: str,
+    flow_file: str,
+    radius_m: float,
+    std_ym: str | None = None,
+    flow: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """flow를 넘기면 SKT 파일을 다시 읽지 않는다. (RunAll.py가 반경 3개를 돌릴 때 파일은 한 번만 읽으려고)"""
+    stops = load_seoul_stops(route)
+    if flow is None:
+        flow = load_flow_population(RAW_DIR / flow_file, std_ym=std_ym)
     flow_by_stop = join_flow_to_stops(stops, flow, radius_m=radius_m)
     return to_long(flow_by_stop)
 
