@@ -61,6 +61,10 @@ def load_road_indicator(path: Path) -> pd.DataFrame:
         "sigungu_name": "SIGUNGU_NAME",
         "road_length": "ROAD_LENGTH",
         "lev5_5_link_id": "LEVEL5_5_LINKID",
+        "sido_name": "SIDO_NAME",
+        "emd_code": "EMD_CODE",
+        "emd_name": "EMD_NAME",
+        
     }
     df = df.rename(columns=rename_map)
     return df
@@ -211,7 +215,8 @@ def compute_stop_congestion_index(
         row = {"seq": stop["seq"], "stop_name": stop["stop_name"], "sgg_nm": stop["sgg_nm"],
                "dong_nm": stop["dong_nm"], "match_level": level, "n_links": len(links)}
         if links.empty:
-            row.update({"road_length_sum_m": np.nan, "speed_drop_ratio_wavg": np.nan, "stop_congestion_index": np.nan})
+            row.update({"road_length_sum_m": np.nan, "speed_drop_ratio_wavg": np.nan, "stop_congestion_index": np.nan,
+                        "velocity_avg_wavg": np.nan, "velocity_cg_wavg": np.nan})
         else:
             w = links["ROAD_LENGTH"]
             sdr = 1 - links["velocity_CG_AVRG"] / links["velocity_AVRG_NRMLT"]
@@ -220,6 +225,9 @@ def compute_stop_congestion_index(
                 "road_length_sum_m": float(w.sum()),
                 "speed_drop_ratio_wavg": float((sdr * w).sum() / w.sum()),
                 "stop_congestion_index": float((comp * w).sum() / w.sum() * 100),
+                # 정류장 주변 도로 평균속도 (km/h, 길이 가중). 11번 서비스에서 차내 이동 시간 계산에 사용
+                "velocity_avg_wavg": float((links["velocity_AVRG"] * w).sum() / w.sum()),
+                "velocity_cg_wavg": float((links["velocity_CG_AVRG"] * w).sum() / w.sum()),
             })
         rows.append(row)
     return pd.DataFrame(rows)

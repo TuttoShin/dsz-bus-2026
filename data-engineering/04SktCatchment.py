@@ -17,17 +17,11 @@ SKT 시간대별 유동인구(seoul_flow_time.csv, 50m*50m cell 단위, 서울�
 주변엔 사람이 많았는데 승차는 안 늘어난 정류장/시간대를 잔차로 잡아낼 수 있다
 -> 미승차 수요 추정의 재료
 
-데이터 정의서 기준 스펙 (SKT_003, seoul_flow_time.csv)
-- 구분자: 파이프(|), 인코딩: utf-8
-- PK: STD_YM(기준년월, YYYYMM) + X_COORD + Y_COORD (둘 다 UTM-K, 문자열로 제공됨)
-- TMST_00 ~ TMST_23: 해당 시(hour)의 유동인구 추정치(명, 소수점 있음)
-- 공간 단위: 50m*50m cell (즉 각 좌표는 셀의 대표점)
-
 요일별 유동인구 (SKT_002, seoul_flow_wkdy.csv)
 - FLOW_POP_CNT_MON ~ SUN: 그 달의 요일 평균 유동인구 (화요일만 TUS로 표기)
 - 정류장 반경 안을 같은 방식으로 합산해서 평일 평균(flow_weekday), 주말 평균(flow_weekend)을 만든다
 - 09번에서 통근 비율 = (평일 - 주말) / 평일 로 쓴다
-  (출퇴근하는 사람은 평일에만 있고, 쇼핑·방문하는 사람은 주말에도 있으니까)
+  (출퇴근하는 사람은 평일에만 있고, 쇼핑방문하는 사람은 주말에도 있으니까)
 
 반경 파라미터)
 정류장 반경 100~150m를 기본 탐색 범위로 잡는다(50m cell 한 칸~두 칸 정도 커버)
@@ -48,6 +42,17 @@ import pandas as pd
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+
+_PRINTED: set[str] = set()
+
+
+def _print_once(*args) -> None:
+    """같은 안내 문구는 한 번만 출력 (RunAll.py가 평일/주말/요일별로 여러 번 부를 때 반복 방지)."""
+    msg = " ".join(str(a) for a in args)
+    if msg not in _PRINTED:
+        _PRINTED.add(msg)
+        print(msg)
+
 
 FLOW_HOURS = [f"TMST_{h:02d}" for h in range(24)]
 # SKT_002 요일별 유동인구 컬럼 (정의서 표기 그대로. 화요일은 TUS)
@@ -70,7 +75,7 @@ def load_seoul_stops(route: str) -> pd.DataFrame:
 
     dropped = stops["표준버스정류장ID"].nunique() - seoul_stops["표준버스정류장ID"].nunique()
     if dropped > 0:
-        print(f"SKT 유동인구 대상 제외(서울 좌표 없음): {dropped}개 정류장 (성남 구간 등)")
+        _print_once(f"SKT 유동인구 대상 제외(서울 좌표 없음): {dropped}개 정류장 (성남 구간 등)")
     return seoul_stops.reset_index(drop=True)
 
 
@@ -175,6 +180,7 @@ def build_weekday_profile(route: str, wkdy: pd.DataFrame, radius_m: float) -> pd
 
     flow_weekday = (월 + 화 + 수 + 목 + 금) / 5
     flow_weekend = (토 + 일) / 2
+    flow_mon ~ flow_sun = 요일별 그대로
     통근 비율 같은 파생값은 여기서 만들지 않는다 (09번에서 계산)
     """
     stops = load_seoul_stops(route)
@@ -184,6 +190,8 @@ def build_weekday_profile(route: str, wkdy: pd.DataFrame, radius_m: float) -> pd
     out = stops[["표준버스정류장ID", "seq", "stop_name"]].copy()
     out["flow_weekday"] = by_day[["MON", "TUE", "WED", "THU", "FRI"]].mean(axis=1).to_numpy()
     out["flow_weekend"] = by_day[["SAT", "SUN"]].mean(axis=1).to_numpy()
+    for k in WKDY_COLS:
+        out[f"flow_{k.lower()}"] = by_day[k].to_numpy()
     return out.reset_index(drop=True)
 
 

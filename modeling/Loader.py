@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-ROOT = Path(__file__).resolve().parents[1]
+import os
+
+ROOT = Path(os.path.abspath(__file__)).parents[1]
 
 
 def load_module(relpath: str) -> ModuleType:
