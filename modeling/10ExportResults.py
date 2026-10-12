@@ -163,7 +163,7 @@ def build_figures(r: dict, out_dir: Path, manifest: list) -> None:
     piv = scored[scored["hour"].isin(PIVOT_HOURS)].pivot_table(index="seq", columns="hour", values="p_board_mid")
     piv = piv.reindex(order["seq"])
     fig, ax = plt.subplots(figsize=(11, max(4, len(piv) * 0.4)))
-    im = ax.imshow(piv.to_numpy(), aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
+    im = ax.imshow(piv.to_numpy(), aspect="auto", cmap="RdYlGn", vmin=0.5, vmax=1)
     ax.set_xticks(range(len(piv.columns)), piv.columns)
     ylabels = [f"{s:02d} {n}" for s, n in zip(order["seq"], order["stop_label"])]
     ax.set_yticks(range(len(piv)), ylabels, fontsize=9)

@@ -36,10 +36,11 @@ import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
+import os
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.path.abspath(__file__)).parent
 sys.path.insert(0, str(ROOT / "modeling"))
 from Loader import load_module  # noqa: E402
 
@@ -56,15 +57,15 @@ CONFIG = {
     "coord_file": "서울시버스정류소위치정보(20260902).xlsx",
     "boundary_file": "HangJeongDongSeoulVer20260701.csv",  # 행정동 경계 (geojson은 반입 불가라 CSV로 변환해 감)
     # SKT
-    "flow_file": "seoul_flow_time.csv",  # SKT_003 시간대별
-    "wkdy_file": "seoul_flow_wkdy.csv",  # SKT_002 요일별 (통근 보정용)
+    "flow_file": "seoul_flow_time_202408.csv",  # SKT_003 시간대별
+    "wkdy_file": "seoul_flow_wkdy_202408.csv",  # SKT_002 요일별 (통근 보정용)
     "std_ym": "202408",  # SKT는 2024년 데이터만 있음. 승하차(2026년 8월)와 같은 8월로 맞춤
     "radii": [100.0, 150.0, 200.0],  # 정류장 반경(m). 세 개 다 돌려서 비교
     "ref_radius": 150.0,  # 최종 결과에 쓸 반경
     # 도로공사: 9401이 지나는 경부고속도로 구간 (05 --list-only 로 시군구 표기 확인 후 채울 것)
     "road_file": "TB_KOTI_ROAD TRAFFIC INDICATOR.csv",
     "road_names": ["경부고속도로"],
-    "sigungu_names": ["성남시분당구", "서초구"],
+    "sigungu_names": ["성남시 분당구", "서초구"],
     # 정류장별 지수: 도로공사 EMD_NAME 표기가 행정동 이름과 다를 때만 채움 {seq: [EMD_NAME, ...]}
     # 05 --list-emd 로 표기 확인
     "stop_emd_override": {},

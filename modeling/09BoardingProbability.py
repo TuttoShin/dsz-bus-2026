@@ -1,4 +1,4 @@
-"""
+ """
 09BoardingProbability.py
 
 정류장x시간대별로 "기다리는 사람이 이번 버스를 탈 수 있을 확률"을 계산한다.
@@ -170,12 +170,8 @@ def add_capacity_terms(df: pd.DataFrame, cfg: ModelConfig) -> pd.DataFrame:
     df = df.copy()
     df["daily_boarding"] = df["boarding"] / cfg.days
     # 최대 재차는 성남 구간까지 포함한 노선 전체 기준이어야 함 (03번에서 미리 계산해 둔 값)
-    if "route_max_load_hour" in df.columns:
-        route_max = df["route_max_load_hour"]
-    else:
-        print("⚠ route_max_load_hour 없음 -> 남은 구간 내 최대 재차로 대체 (03번 재실행 권장)")
-        route_max = df.groupby("hour")["load_lower"].transform("max")
-    min_deps = route_max / cfg.seat_capacity
+    min_deps = df["load_before_board"] / cfg.seat_capacity
+    
     for tag, h in _scenarios(cfg):
         deps = np.maximum(cfg.days * 60.0 / h, min_deps)  # 월간 운행 대수
         df[f"headway_eff_{tag}"] = cfg.days * 60.0 / deps  # 보정된 배차간격(분)

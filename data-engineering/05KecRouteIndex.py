@@ -61,6 +61,10 @@ def load_road_indicator(path: Path) -> pd.DataFrame:
         "sigungu_name": "SIGUNGU_NAME",
         "road_length": "ROAD_LENGTH",
         "lev5_5_link_id": "LEVEL5_5_LINKID",
+        "sido_name": "SIDO_NAME",
+        "emd_code": "EMD_CODE",
+        "emd_name": "EMD_NAME",
+        
     }
     df = df.rename(columns=rename_map)
     return df
