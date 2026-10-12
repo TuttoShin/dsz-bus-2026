@@ -169,6 +169,7 @@ def build_weekday_profile(route: str, wkdy: pd.DataFrame, radius_m: float) -> pd
 
     flow_weekday = (월 + 화 + 수 + 목 + 금) / 5
     flow_weekend = (토 + 일) / 2
+    flow_mon ~ flow_sun = 요일별 그대로
     통근 비율 같은 파생값은 여기서 만들지 않는다 (09번에서 계산)
     """
     stops = load_seoul_stops(route)
@@ -178,6 +179,8 @@ def build_weekday_profile(route: str, wkdy: pd.DataFrame, radius_m: float) -> pd
     out = stops[["표준버스정류장ID", "seq", "stop_name"]].copy()
     out["flow_weekday"] = by_day[["MON", "TUE", "WED", "THU", "FRI"]].mean(axis=1).to_numpy()
     out["flow_weekend"] = by_day[["SAT", "SUN"]].mean(axis=1).to_numpy()
+    for k in WKDY_COLS:
+        out[f"flow_{k.lower()}"] = by_day[k].to_numpy()
     return out.reset_index(drop=True)
 
 

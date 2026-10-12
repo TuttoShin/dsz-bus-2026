@@ -40,7 +40,9 @@ from Loader import load_module  # noqa: E402
 m09 = load_module("modeling/09BoardingProbability.py")
 
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
-SATURATION_BINS = [0, 0.2, 0.4, 0.6, 0.8, 1.0, np.inf]  # 재차율(재차/좌석) 구간
+# 재차율(재차/좌석) 구간. 0.6 이상은 칸이 몇 개 안 돼서(1~4칸) 하나로 합침
+SATURATION_BINS = [0, 0.2, 0.4, 0.6, np.inf]
+COMMUTE_PEAK_HOURS = [7, 8, 9, 17, 18, 19]  # 통근 보정이 작동하는 시간 (09번 오전첨두·오후첨두)
 
 
 # %%
@@ -61,38 +63,57 @@ CV_VARIANTS = [  # (표에 쓸 이름, 수요신호, 통근 보정)
 
 
 def cv_ablation(features: pd.DataFrame, cfg, k: int = 5, seed: int = 42) -> pd.DataFrame:
-    """공정한 비교를 위해 모든 수요신호가 같은 칸, 같은 5등분을 쓴다.
+    """두 가지 방식으로 나눠 검증한다. 모든 수요신호가 같은 칸, 같은 나눔을 쓴다.
+
+    무작위 5-fold   : 칸을 무작위로 5등분. 이미 본 정류장의 다른 시간대를 맞히는 시험
+    정류장 제외(LOSO): 정류장 하나를 통째로 빼고 학습해서 그 정류장을 맞히는 시험
+                       처음 보는 정류장(노선 확장)에 쓸 수 있는가 -> SKT 유동인구가 필요한지 보는 시험
+                       (처음 보는 정류장은 정류장 계수가 없어서 정류장 효과 평균을 씀)
 
     지표: MAE(평균 오차, 명), RMSE, 포아송 오차, R2(log 기준, 1에 가까울수록 좋음)
-    mae_improvement_vs_no_skt = 1 - (MAE / no_skt의 MAE)   (0.2면 SKT 없을 때보다 오차 20% 감소)
+    mae_improvement_vs_no_skt = 1 - (MAE / 같은 방식 no_skt의 MAE)   (0.2면 SKT 없을 때보다 오차 20% 감소)
+    mae_peak_hours: 출퇴근 첨두(7~9시, 17~19시) 칸만의 MAE. 통근 보정은 이 시간에만 작동하므로 효과는 여기서 봐야 함
     """
-    base = m09.add_capacity_terms(m09.add_demand_signal(features, "no_skt"), cfg)
+    base = m09.add_capacity_terms(m09.add_demand_signal(features, "no_skt", cfg.daytype), cfg)
     pool_idx = base.index[base["unconstrained"] & base["has_skt"]]
     rng = np.random.default_rng(seed)
-    folds = rng.integers(0, k, size=len(pool_idx))
+    splits = {
+        "무작위 5-fold": rng.integers(0, k, size=len(pool_idx)),
+        "정류장 제외(LOSO)": base.loc[pool_idx, "seq"].to_numpy(),
+    }
+    out = pd.concat([_cv_once(features, cfg, pool_idx, folds).assign(cv_type=name) for name, folds in splits.items()],
+                    ignore_index=True)
+    return out
 
+
+def _cv_once(features: pd.DataFrame, cfg, pool_idx, folds: np.ndarray) -> pd.DataFrame:
     rows = []
     for label, v, commute in CV_VARIANTS:
         try:
-            df = m09.add_capacity_terms(m09.add_demand_signal(features, v), cfg).loc[pool_idx]
+            df = m09.add_capacity_terms(m09.add_demand_signal(features, v, cfg.daytype), cfg).loc[pool_idx]
         except ValueError as e:
             print(f"{v} 생략: {e}")
             continue
-        y_all, pred_all = [], []
-        for f in range(k):
+        y_all, pred_all, hour_all = [], [], []
+        for f in np.unique(folds):
             train, test = df[folds != f], df[folds == f]
             if test.empty or train.empty:
                 continue
             model = m09.fit_demand_model(train, v, commute)
             pred_all.append(model.predict(test))
             y_all.append(test["daily_boarding"].to_numpy(float))
+            hour_all.append(test["hour"].to_numpy())
         y, pred = np.concatenate(y_all), np.concatenate(pred_all)
+        # 통근 보정이 작동하는 출퇴근 첨두(7~9시, 17~19시) 칸만의 오차
+        peak = np.isin(np.concatenate(hour_all), COMMUTE_PEAK_HOURS)
         ss_res = np.sum((np.log1p(y) - np.log1p(pred)) ** 2)
         ss_tot = np.sum((np.log1p(y) - np.log1p(y).mean()) ** 2)
         rows.append({
             "signal_variant": label,
             "n_cells": len(y),
             "mae_daily_boarding": float(np.mean(np.abs(y - pred))),
+            "n_cells_peak": int(peak.sum()),
+            "mae_peak_hours": float(np.mean(np.abs(y[peak] - pred[peak]))) if peak.any() else np.nan,
             "rmse_daily_boarding": float(np.sqrt(np.mean((y - pred) ** 2))),
             "poisson_deviance": _poisson_deviance(y, pred),
             "r2_log": float(1 - ss_res / ss_tot) if ss_tot > 0 else np.nan,
@@ -101,6 +122,8 @@ def cv_ablation(features: pd.DataFrame, cfg, k: int = 5, seed: int = 42) -> pd.D
     if "no_skt" in set(out["signal_variant"]):
         ref = out.loc[out["signal_variant"] == "no_skt", "mae_daily_boarding"].iloc[0]
         out["mae_improvement_vs_no_skt"] = 1 - out["mae_daily_boarding"] / ref
+        ref_peak = out.loc[out["signal_variant"] == "no_skt", "mae_peak_hours"].iloc[0]
+        out["mae_peak_improvement_vs_no_skt"] = 1 - out["mae_peak_hours"] / ref_peak
     return out
 
 
@@ -200,6 +223,36 @@ def rule_vs_model(rule_scored: pd.DataFrame, model_scored: pd.DataFrame, top_n: 
             f"top{top_n}_overlap": len(top_model & top_rule) / top_n,
         })
     return pd.DataFrame(rows)
+
+
+# %%
+def assumption_effect(
+    features: pd.DataFrame, cfg, param: str, values: list[float], model=None, hours: list[int] | None = None
+) -> pd.DataFrame:
+    """가정값(param) 하나를 values로 바꿔가며 결과 비교. 첫 값이 기준(효과 없음).
+    hours를 주면 그 시간대(출퇴근)만 요약."""
+    rows = []
+    for v in values:
+        scored, _, _ = m09.run_model(features, replace(cfg, **{param: v}), model=model)
+        d = scored[scored["has_skt"]]
+        if hours is not None:
+            d = d[d["hour"].isin(hours)]
+        p = d.set_index(["seq", "hour"])["p_board_mid"]
+        rows.append({
+            param: v,
+            "is_default": v == getattr(cfg, param),
+            "p_board_mid_mean": float(p.mean()),
+            "p_board_mid_min": float(p.min()),
+            "n_cells_위험": int((d["grade"] == "위험").sum()),
+            "n_cells_보통": int((d["grade"] == "보통").sum()),
+        })
+    return pd.DataFrame(rows)
+
+
+def bunching_effect(features, cfg, model=None, cvs=(0.0, 0.5, 1.0), hours=None) -> pd.DataFrame:
+    """버스 몰림 정도(CV)별 비교. 0 = 몰림 없음."""
+    return assumption_effect(features, cfg, "bunching_cv", list(cvs), model, hours)
+
 
 
 # %%

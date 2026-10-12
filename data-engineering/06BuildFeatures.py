@@ -97,7 +97,8 @@ def attach_weekday_profile(df: pd.DataFrame, wkdy_profile: pd.DataFrame | None) 
     if wkdy_profile is None:
         print("요일별 유동인구 없음 -> flow_weekday/flow_weekend 빈 값 (09번 통근 보정 꺼짐)")
         return df.assign(flow_weekday=np.nan, flow_weekend=np.nan)
-    return df.merge(wkdy_profile[["seq", "flow_weekday", "flow_weekend"]], on="seq", how="left")
+    cols = ["seq"] + [c for c in wkdy_profile.columns if c.startswith("flow_")]
+    return df.merge(wkdy_profile[cols], on="seq", how="left")
 
 
 def attach_stop_congestion_index(df: pd.DataFrame, kec_stop: pd.DataFrame | None) -> pd.DataFrame:

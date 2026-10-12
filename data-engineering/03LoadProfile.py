@@ -155,10 +155,35 @@ def add_stop_label(profile: pd.DataFrame) -> pd.DataFrame:
     return profile
  
 # %%
-def build_load_profile(
-    route: str, headway_min: int = 3, headway_max: int = 7, weekdays: int = 20
+def split_daytype(bus_long: pd.DataFrame, ratio: pd.DataFrame, daytype: str) -> pd.DataFrame:
+    """시간대별 월 합계 -> 그 날(평일/주말/요일) 하루 평균. (01bDayTypeRatio.py 일별 평균 사용)
+
+    daytype: "weekday", "weekend", 또는 요일 "mon" ~ "sun"
+    그 날 하루 평균 = 시간대별 월 합계 x (그 날 하루 평균 승차 / 한 달 승차 합계)   <- 정류장별
+      한 달 승차 합계 = 평일 일수 x 평일 하루 평균 + 주말 일수 x 주말 하루 평균
+    한계: 시간대별 모양(몇 시에 많이 타는지)은 요일마다 같다고 가정 (시간대 x 요일 데이터가 없음)
+    """
+    df = bus_long.copy()
+    df["표준버스정류장ID"] = df["표준버스정류장ID"].astype(str)
+    rt = ratio.copy()
+    rt["표준버스정류장ID"] = rt["표준버스정류장ID"].astype(str)
+    n_wd, n_we = int(rt["n_weekday_days"].iloc[0]), int(rt["n_weekend_days"].iloc[0])
+
+    for kind, col in (("board", "boarding"), ("alight", "alighting")):
+        month = rt[f"{kind}_weekday"] * n_wd + rt[f"{kind}_weekend"] * n_we  # 정류장별 한 달 합계
+        share = rt[f"{kind}_{daytype}"] / month.where(month > 0)              # 그 날 하루 / 한 달
+        # 일별 파일에 없는 정류장은 노선 전체 비율로
+        overall = rt[f"{kind}_{daytype}"].sum() / month.sum()
+        f = df["표준버스정류장ID"].map(pd.Series(share.to_numpy(), index=rt["표준버스정류장ID"])).fillna(overall)
+        df[col] = df[col] * f
+    return df
+
+
+def build_load_profile_from(
+    bus_long: pd.DataFrame, stop_master: pd.DataFrame,
+    headway_min: float = 3, headway_max: float = 7, weekdays: float = 20,
 ) -> pd.DataFrame:
-    bus_long, stop_master = load_inputs(route)
+    """파일을 읽지 않고 주어진 승하차로 재차 계산. (RunAll.py가 평일/주말 따로 부름)"""
     segments = derive_segments(stop_master)
  
     profile = compute_load_lower_bound(bus_long)
@@ -172,8 +197,15 @@ def build_load_profile(
         "per_bus_avg_low", "per_bus_avg_high",
     ]
     return profile[cols].sort_values(["hour", "seq"]).reset_index(drop=True)
- 
- 
+
+
+def build_load_profile(
+    route: str, headway_min: int = 3, headway_max: int = 7, weekdays: int = 20
+) -> pd.DataFrame:
+    bus_long, stop_master = load_inputs(route)
+    return build_load_profile_from(bus_long, stop_master, headway_min, headway_max, weekdays)
+
+
 # %%
 def top_congested_by_segment(profile: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
     """구간별로 load_lower가 가장 높은 (시간대, 정류장) 조합 top_n개 뽑기

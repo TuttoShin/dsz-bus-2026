@@ -67,11 +67,37 @@ def make_dummy_wkdy(route: str = "9401") -> None:
     print(f"dummy wkdy saved: {len(rows)} rows")
 
 
+def make_dummy_daily(route: str, bus_long: pd.DataFrame) -> None:
+    """일별 승하차 가짜 데이터 (2026년 8월). 정류장마다 주말 비율을 다르게.
+    성남 정류장(ID 2로 시작)은 출퇴근 노선이라 주말에 많이 줄게(0.3~0.6), 서울은 덜 줄게(0.5~1.0)."""
+    bl = bus_long.copy()
+    bl["표준버스정류장ID"] = bl["표준버스정류장ID"].astype(str)
+    tot = bl.groupby(["표준버스정류장ID", "버스정류장ARS번호", "stop_name"])[["boarding", "alighting"]].sum().reset_index()
+    dates = pd.date_range("2026-08-01", "2026-08-31")
+    is_we = (dates.dayofweek >= 5) | (dates == pd.Timestamp("2026-08-17"))
+    n_wd, n_we = int((~is_we).sum()), int(is_we.sum())
+
+    rows = []
+    for s in tot.itertuples():
+        r = rng.uniform(0.3, 0.6) if s.표준버스정류장ID.startswith("2") else rng.uniform(0.5, 1.0)
+        wd_b, wd_a = s.boarding / (n_wd + n_we * r), s.alighting / (n_wd + n_we * r)
+        for d, we in zip(dates, is_we):
+            f = r if we else 1.0
+            rows.append({
+                "사용일자": d.strftime("%Y%m%d"), "노선번호": route, "노선명": f"{route}번",
+                "표준버스정류장ID": s.표준버스정류장ID, "버스정류장ARS번호": s.버스정류장ARS번호, "역명": s.stop_name,
+                "승차총승객수": int(rng.poisson(max(wd_b * f, 0))), "하차총승객수": int(rng.poisson(max(wd_a * f, 0))),
+                "등록일자": "20260901",
+            })
+    pd.DataFrame(rows).to_csv(RAW_DIR / "dummy_bus_daily.csv", index=False, encoding="utf-8-sig")
+    print(f"dummy daily saved: {len(rows)} rows (평일 {n_wd}일, 주말·공휴일 {n_we}일)")
+
+
 def make_dummy_road_indicator() -> None:
     """05번 ROUTE_SECTIONS와 같은 도로명으로 가짜 링크 생성.
     대전 경부고속도로, 부산 중구 링크도 섞어둠 -> 05번 필터가 이걸 제대로 빼는지 확인용."""
     links = [
-        ("경부고속도로", "경기도", "성남시분당구", 4), ("경부고속도로", "서울특별시", "서초구", 3),
+        ("경부고속도로", "경기도", "성남시 분당구", 4), ("경부고속도로", "서울특별시", "서초구", 3),
         ("한남대로", "서울특별시", "용산구", 2), ("을지로", "서울특별시", "중구", 2), ("종로", "서울특별시", "종로구", 2),
         ("세종대로", "서울특별시", "중구", 2), ("퇴계로", "서울특별시", "중구", 2),
         ("경부고속도로", "대전광역시", "대덕구", 3), ("중앙대로", "부산광역시", "중구", 2),  # 미끼

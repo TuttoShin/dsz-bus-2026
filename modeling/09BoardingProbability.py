@@ -1,4 +1,4 @@
- """
+"""
 09BoardingProbability.py
 
 정류장x시간대별로 "기다리는 사람이 이번 버스를 탈 수 있을 확률"을 계산한다.
@@ -30,6 +30,14 @@
        p_board_mid : 5분
        p_board_low : 7분 (버스 적음 -> 확률 낮음)
 
+2-1. 버스 몰림 효과 (bunching_cv)
+   - 9401은 평일에 2~4대가 한꺼번에 지나간 뒤 6~10분 이상 간격이 벌어지는 일이 잦다 (공개 자료)
+   - 버스가 몰려 오면 긴 간격 뒤에 오는 버스 앞에 사람이 많이 쌓이고, 기다리는 사람 대부분이 그 버스를 만난다
+   - 배차가 들쭉날쭉한 정도를 CV(= 배차간격 표준편차 / 평균 배차간격)라고 하면
+       버스 1대 앞 대기 인원 = lambda x (1 + CV^2)
+     CV = 0 이면 정확히 일정한 배차(몰림 없음), CV = 1 이면 완전히 무작위로 오는 수준
+   - 실측 CV를 모르므로 기본 0.5로 두고, 08번에서 0 / 0.5 / 1을 비교한다
+
 3. 추가 대기시간
    - 매 버스마다 확률 P로 탈 수 있다면, 놓치는 버스 수 평균 = 1/P - 1
    - 추가 대기시간(분) = 배차간격 x (1/P - 1)   (60분 이상은 60으로 표시)
@@ -52,6 +60,15 @@
    정류장마다 고정된 비율을 그냥 곱하면 정류장 계수에 흡수돼서 아무 효과가 없다.
    그래서 출퇴근 시간대에만 작동하는 항목으로 넣고, 그 효과 크기(계수)는 데이터에서 추정한다.
    오전/오후를 따로 두는 이유: 도심 정류장은 아침엔 직장인이 내리는 곳, 저녁엔 타는 곳이라 방향이 반대
+
+평일 / 주말 (daytype)
+   승하차는 01b·03번에서 평일 하루 평균 / 주말 하루 평균으로 나눠서 들어온다.
+   모델은 평일 데이터로 학습하고, 주말은 같은 모델에 아래만 바꿔 적용한다.
+     - 수요신호: 유동인구 x (그 정류장 주말 유동인구 / 요일 평균 유동인구)   <- SKT 요일별
+       (평일은 평일 유동인구 / 요일 평균. 요일 평균 = (평일 x 5 + 주말 x 2) / 7)
+     - 통근 보정: 주말엔 출퇴근이 없으니 끔
+     - 배차간격: 주말 설정값
+   그래서 "평일엔 위험, 주말엔 여유"라면 그 차이는 출퇴근 때문이라고 말할 수 있다.
 
 한계
    - 못 탄 사람이 다음 버스 대기 줄에 더해지는 건 반영 안 함 -> 실제보다 확률이 높게 나올 수 있음
@@ -81,6 +98,7 @@ TAU_DEFAULT = 0.6
 SIGNAL_DEFAULT = "flow_x_share"
 SIGNAL_VARIANTS = ["no_skt", "flow", "flow_x_share", "flow_x_share_hourly"]
 COMMUTE_BANDS = ["오전첨두", "오후첨두"]  # 통근 보정이 작동하는 시간대
+WEEKEND_KEYS = {"weekend", "sat", "sun"}  # 통근 보정을 끄는 날 (sun = 일요일·공휴일)
 MAX_EXTRA_WAIT_MIN = 60.0
 GRADE_THRESHOLDS = {"여유": 0.9, "보통": 0.7}  # 확률 0.9 이상 여유 / 0.7~0.9 보통 / 0.7 미만 위험
 
@@ -105,6 +123,8 @@ class ModelConfig:
     tau: float = TAU_DEFAULT
     signal: str = SIGNAL_DEFAULT
     use_commute: bool = True  # 통근 보정 (요일별 유동인구 필요)
+    daytype: str = "all"  # "weekday" / "weekend" / 요일 "mon"~"sun" / "all"(구분 없음)
+    bunching_cv: float = 0.0  # 버스 몰림 정도 (0 = 일정한 배차)
 
     @property
     def headway_mid(self) -> float:
@@ -112,7 +132,7 @@ class ModelConfig:
 
 
 # %%
-def add_demand_signal(df: pd.DataFrame, variant: str) -> pd.DataFrame:
+def add_demand_signal(df: pd.DataFrame, variant: str, daytype: str = "all") -> pd.DataFrame:
     """수요신호(signal) 컬럼을 만든다. 유동인구가 없는 칸은 비워둔다(NaN)."""
     if variant not in SIGNAL_VARIANTS:
         raise ValueError(f"signal은 {SIGNAL_VARIANTS} 중 하나")
@@ -127,12 +147,20 @@ def add_demand_signal(df: pd.DataFrame, variant: str) -> pd.DataFrame:
     else:
         df["commute_ratio"] = np.nan
     for band in COMMUTE_BANDS:
-        df[f"commute_{band}"] = df["commute_ratio"].fillna(0) * (df["hour_band"] == band)
+        # 주말엔 출퇴근이 없으니 통근 보정 0
+        on = 0.0 if daytype in WEEKEND_KEYS else 1.0
+        df[f"commute_{band}"] = df["commute_ratio"].fillna(0) * (df["hour_band"] == band) * on
+
+    # 평일/주말 유동인구 배율 = 그 날 유동인구 / 요일 평균 유동인구 (정류장별)
+    day_factor = pd.Series(1.0, index=df.index)
+    if daytype != "all" and f"flow_{daytype}" in df.columns and {"flow_weekday", "flow_weekend"} <= set(df.columns):
+        week_avg = (5 * df["flow_weekday"] + 2 * df["flow_weekend"]) / 7  # = 월~일 평균
+        day_factor = (df[f"flow_{daytype}"] / week_avg.where(week_avg > 0)).fillna(1.0)
 
     if variant == "no_skt":
         sig = pd.Series(1.0, index=df.index)
     else:
-        sig = df["flow_pop"].astype(float)
+        sig = df["flow_pop"].astype(float) * day_factor
         if "_x_share" in variant:
             col = "share_all" if variant.endswith("_hourly") else "share_all_stop"
             if col not in df or df[col].notna().sum() == 0:
@@ -170,8 +198,15 @@ def add_capacity_terms(df: pd.DataFrame, cfg: ModelConfig) -> pd.DataFrame:
     df = df.copy()
     df["daily_boarding"] = df["boarding"] / cfg.days
     # 최대 재차는 성남 구간까지 포함한 노선 전체 기준이어야 함 (03번에서 미리 계산해 둔 값)
-    min_deps = df["load_before_board"] / cfg.seat_capacity
-    
+    # 정류장마다 따로 계산하면 같은 버스인데 정류장마다 대수가 달라지고,
+    # 대수가 부족한 정류장은 자동으로 "정확히 만석 -> 확률 0"이 돼서 노선 전체 기준으로 한다
+    if "route_max_load_hour" in df.columns:
+        route_max = df["route_max_load_hour"]
+    else:
+        print("⚠ route_max_load_hour 없음 -> 남은 구간 내 최대 재차로 대체 (03번 재실행 권장)")
+        route_max = df.groupby("hour")["load_lower"].transform("max")
+    min_deps = route_max / cfg.seat_capacity
+
     for tag, h in _scenarios(cfg):
         deps = np.maximum(cfg.days * 60.0 / h, min_deps)  # 월간 운행 대수
         df[f"headway_eff_{tag}"] = cfg.days * 60.0 / deps  # 보정된 배차간격(분)
@@ -222,6 +257,7 @@ class DemandModel:
     stops: list = field(default_factory=list)  # 계수를 따로 갖는 정류장 seq (첫 정류장은 기준이라 제외)
     bands: list = field(default_factory=list)
     use_commute: bool = False
+    ref_stop: int | None = None  # 기준 정류장 (계수 0)
     beta: np.ndarray | None = None
     n_train: int = 0
 
@@ -236,6 +272,12 @@ class DemandModel:
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """자리가 충분했다면 탔을 하루 평균 인원을 예측한다."""
         eta = self.design(df) @ self.beta + np.log(df["signal"].to_numpy(float))
+        # 학습 때 못 본 정류장(08번 정류장 제외 검증)은 정류장 효과 평균을 씀
+        known = set(self.stops) | {self.ref_stop}
+        unseen = ~df["seq"].isin(known).to_numpy()
+        if unseen.any():
+            stop_coefs = np.concatenate([[0.0], self.beta[1:1 + len(self.stops)]])
+            eta = eta + unseen * stop_coefs.mean()
         return np.exp(np.clip(eta, -30, 30))
 
     def coef_table(self) -> pd.DataFrame:
@@ -255,7 +297,8 @@ def fit_demand_model(train: pd.DataFrame, signal: str, use_commute: bool = False
     stops = sorted(train["seq"].unique())
     bands = [b for b in HOUR_BANDS if b in set(train["hour_band"])]
     # 첫 정류장/첫 시간대 묶음은 기준으로 두고 나머지만 계수를 구함 (계수가 하나로 정해지게)
-    model = DemandModel(signal=signal, stops=stops[1:], bands=bands[1:], use_commute=use_commute, n_train=len(train))
+    model = DemandModel(signal=signal, stops=stops[1:], bands=bands[1:], use_commute=use_commute,
+                        ref_stop=stops[0], n_train=len(train))
     X = model.design(train)
     model.beta = fit_poisson_glm(X, train["daily_boarding"].to_numpy(float), np.log(train["signal"].to_numpy(float)))
     return model
@@ -296,7 +339,8 @@ def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> pd.DataFrame
     kmax = int(cfg.seat_capacity)
     for tag, _ in _scenarios(cfg):
         h = df[f"headway_eff_{tag}"].to_numpy(float)
-        lam = df["latent_daily"].to_numpy(float) * h / 60.0  # 버스 1대 앞 대기 인원
+        # 버스 1대 앞 대기 인원 (몰림 효과 포함)
+        lam = df["latent_daily"].to_numpy(float) * h / 60.0 * (1 + cfg.bunching_cv ** 2)
         r = np.floor(df[f"seats_avail_{tag}"].to_numpy(float))
         served = poisson_expected_min(lam, r, kmax)
         p = np.where(lam > 1e-9, served / np.maximum(lam, 1e-9), 1.0)
@@ -317,16 +361,24 @@ def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> pd.DataFrame
 
 
 # %%
-def run_model(features: pd.DataFrame, cfg: ModelConfig) -> tuple[pd.DataFrame, DemandModel, dict]:
-    """위의 1~3단계를 순서대로 실행. diag는 학습에 쓴 칸 수 등 확인용 숫자."""
-    df = add_demand_signal(features, cfg.signal)
+def run_model(
+    features: pd.DataFrame, cfg: ModelConfig, model: DemandModel | None = None
+) -> tuple[pd.DataFrame, DemandModel, dict]:
+    """위의 1~3단계를 순서대로 실행. diag는 학습에 쓴 칸 수 등 확인용 숫자.
+
+    model을 넘기면 새로 학습하지 않고 그 모델을 그대로 적용한다 (주말 = 평일 모델 적용)
+    """
+    df = add_demand_signal(features, cfg.signal, cfg.daytype)
     df = add_capacity_terms(df, cfg)
     train = df[df["unconstrained"] & df["signal"].notna()]
-    model = fit_demand_model(train, cfg.signal, cfg.use_commute)
+    if model is None:
+        model = fit_demand_model(train, cfg.signal, cfg.use_commute)
     df = estimate_latent_demand(df, model)
     df = add_boarding_probability(df, cfg)
     skt = df[df["has_skt"]]
     diag = {
+        "daytype": cfg.daytype,
+        "bunching_cv": cfg.bunching_cv,
         "signal": cfg.signal,
         "use_commute": model.use_commute,
         "tau": cfg.tau,
