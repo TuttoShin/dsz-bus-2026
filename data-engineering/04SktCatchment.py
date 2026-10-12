@@ -43,6 +43,17 @@ import pandas as pd
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
 
+_PRINTED: set[str] = set()
+
+
+def _print_once(*args) -> None:
+    """같은 안내 문구는 한 번만 출력 (RunAll.py가 평일/주말/요일별로 여러 번 부를 때 반복 방지)."""
+    msg = " ".join(str(a) for a in args)
+    if msg not in _PRINTED:
+        _PRINTED.add(msg)
+        print(msg)
+
+
 FLOW_HOURS = [f"TMST_{h:02d}" for h in range(24)]
 # SKT_002 요일별 유동인구 컬럼 (정의서 표기 그대로. 화요일은 TUS)
 WKDY_COLS = {
@@ -64,7 +75,7 @@ def load_seoul_stops(route: str) -> pd.DataFrame:
 
     dropped = stops["표준버스정류장ID"].nunique() - seoul_stops["표준버스정류장ID"].nunique()
     if dropped > 0:
-        print(f"SKT 유동인구 대상 제외(서울 좌표 없음): {dropped}개 정류장 (성남 구간 등)")
+        _print_once(f"SKT 유동인구 대상 제외(서울 좌표 없음): {dropped}개 정류장 (성남 구간 등)")
     return seoul_stops.reset_index(drop=True)
 
 

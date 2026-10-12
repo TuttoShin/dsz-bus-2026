@@ -34,6 +34,17 @@ import pandas as pd
 
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
 
+_PRINTED: set[str] = set()
+
+
+def _print_once(*args) -> None:
+    """같은 안내 문구는 한 번만 출력 (RunAll.py가 평일/주말/요일별로 여러 번 부를 때 반복 방지)."""
+    msg = " ".join(str(a) for a in args)
+    if msg not in _PRINTED:
+        _PRINTED.add(msg)
+        print(msg)
+
+
 ANALYSIS_SEGMENTS = ["서울_도심루프"]
 
 
@@ -64,8 +75,8 @@ def merge_boarding_and_flow(load_profile: pd.DataFrame, flow_profile: pd.DataFra
     )
     missing = merged.loc[merged["flow_pop"].isna(), "seq"].nunique()
     if missing:
-        print(f"flow_pop 없음(성남 구간 등, SKT 커버리지 밖): {missing}개 정류장")
-    print(f"merge 후 정류장 수: {before} -> {merged['seq'].nunique()} (변화 없어야 정상, left join이므로)")
+        _print_once(f"flow_pop 없음(성남 구간 등, SKT 커버리지 밖): {missing}개 정류장")
+    _print_once(f"merge 후 정류장 수: {before} -> {merged['seq'].nunique()} (변화 없어야 정상, left join이므로)")
     return merged
 
 
@@ -74,7 +85,7 @@ def merge_route_share(df: pd.DataFrame, route_share: pd.DataFrame | None) -> pd.
     """03b 노선 분담률을 (표준버스정류장ID, hour)로 붙인다. 파일이 없으면 NaN 컬럼만 만든다."""
     df = df.copy()
     if route_share is None:
-        print("route_share 없음 -> 분담률 컬럼 NaN (09번은 분담률 없는 신호만 사용)")
+        _print_once("route_share 없음 -> 분담률 컬럼 NaN (09번은 분담률 없는 신호만 사용)")
         df["share_all_stop"] = np.nan
         df["share_all"] = np.nan
         df["share_express"] = np.nan
@@ -98,7 +109,7 @@ def attach_congestion_index(df: pd.DataFrame, kec_overall: pd.DataFrame) -> pd.D
 def attach_weekday_profile(df: pd.DataFrame, wkdy_profile: pd.DataFrame | None) -> pd.DataFrame:
     """정류장별 평일/주말 유동인구(04번)를 seq로 붙인다. 없으면 빈 값."""
     if wkdy_profile is None:
-        print("요일별 유동인구 없음 -> flow_weekday/flow_weekend 빈 값 (09번 통근 보정 꺼짐)")
+        _print_once("요일별 유동인구 없음 -> flow_weekday/flow_weekend 빈 값 (09번 통근 보정 꺼짐)")
         return df.assign(flow_weekday=np.nan, flow_weekend=np.nan)
     cols = ["seq"] + [c for c in wkdy_profile.columns if c.startswith("flow_")]
     return df.merge(wkdy_profile[cols], on="seq", how="left")
@@ -107,7 +118,7 @@ def attach_weekday_profile(df: pd.DataFrame, wkdy_profile: pd.DataFrame | None) 
 def attach_stop_congestion_index(df: pd.DataFrame, kec_stop: pd.DataFrame | None) -> pd.DataFrame:
     """정류장별 혼잡 지수(05번 --by-stop)를 seq로 붙인다. 없으면 빈 값."""
     if kec_stop is None:
-        print("kec_stop 없음 -> stop_congestion_index 빈 값")
+        _print_once("kec_stop 없음 -> stop_congestion_index 빈 값")
         return df.assign(stop_congestion_index=np.nan)
     return df.merge(kec_stop[["seq", "stop_congestion_index"]], on="seq", how="left")
 
@@ -136,7 +147,7 @@ def merge_all(
     merged = merge_boarding_and_flow(load_profile, flow_profile)
     before = merged["seq"].nunique()
     merged = merged[merged["segment"].isin(ANALYSIS_SEGMENTS)].reset_index(drop=True)
-    print(f"분석 범위 {ANALYSIS_SEGMENTS}로 한정: 정류장 {before} -> {merged['seq'].nunique()}")
+    _print_once(f"분석 범위 {ANALYSIS_SEGMENTS}로 한정: 정류장 {before} -> {merged['seq'].nunique()}")
     merged = merge_route_share(merged, route_share)
     merged = attach_congestion_index(merged, kec_overall)
     merged = attach_stop_congestion_index(merged, kec_stop)

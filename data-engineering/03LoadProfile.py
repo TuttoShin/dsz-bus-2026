@@ -36,6 +36,17 @@ import numpy as np
 import pandas as pd
 
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+
+_PRINTED: set[str] = set()
+
+
+def _print_once(*args) -> None:
+    """같은 안내 문구는 한 번만 출력 (RunAll.py가 평일/주말/요일별로 여러 번 부를 때 반복 방지)."""
+    msg = " ".join(str(a) for a in args)
+    if msg not in _PRINTED:
+        _PRINTED.add(msg)
+        print(msg)
+
  
  
 # %%
@@ -68,7 +79,7 @@ def derive_segments(stop_master: pd.DataFrame) -> pd.DataFrame:
         return "서울_도심루프"
  
     seg["segment"] = seg["seq"].apply(_label)
-    print(
+    _print_once(
         f"서울 도심 구간: seq {seoul_min}~{seoul_max} "
         f"(상행: seq<{seoul_min}, 하행: seq>{seoul_max})"
     )
