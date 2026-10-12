@@ -92,6 +92,10 @@ CONFIG = {
     # 근거: 평일에 2~4대가 몰려 온 뒤 6~10분 이상 공백이 생기는 일이 잦다 (나무위키 9401, 2026)
     "bunching_cv": 0.5,
     "bunching_cvs": [0.0, 0.5, 1.0],  # 08번에서 비교할 값
+    # 도로공사 혼잡 지수로 정류장마다 몰림 정도를 다르게 (평균은 bunching_cv 그대로)
+    "bunching_by_road": True,
+    # 11번 서비스 계산용 기준값 (모델 가정이 아니라 안내 계산용 일반값)
+    "service": {"walk_speed_kmh": 4.5, "detour": 1.3, "max_walk_m": 800, "dwell_min": 0.5, "workdays_per_year": 250},
     # 07번 가중합 점수의 가중치 (09번과 비교용)
     "rule_weights": {"w_load": 0.35, "w_flow": 0.4, "w_congestion": 0.25},
     "export_dir": "export",
@@ -164,6 +168,7 @@ def run(c: dict, dummy: bool = False) -> None:
     m08 = load_module("modeling/08Validate.py")
     m09 = load_module("modeling/09BoardingProbability.py")
     m10 = load_module("modeling/10ExportResults.py")
+    m11 = load_module("modeling/11ServiceRecommend.py")
     route = c["route"]
 
     step("01. 승하차 원본 CSV -> 정류장x시간대")
@@ -271,7 +276,7 @@ def run(c: dict, dummy: bool = False) -> None:
     cfg = m09.ModelConfig(
         seat_capacity=c["seat_capacity"], days=days, headway_min=c["headway_min"],
         headway_max=c["headway_max"], tau=c["tau"], signal=c["signal"], use_commute=c["use_commute"],
-        daytype="weekday" if ratio is not None else "all", bunching_cv=c["bunching_cv"],
+        daytype="weekday" if ratio is not None else "all", bunching_cv=c["bunching_cv"], bunching_by_road=c["bunching_by_road"],
     )
     model_scored, model, diag = m09.run_model(features, cfg)
     print("[평일]", diag)
@@ -305,6 +310,20 @@ def run(c: dict, dummy: bool = False) -> None:
         bunch = pd.concat([bunch, m08.bunching_effect(
             features_we, cfg_we, model=model, cvs=c["bunching_cvs"], hours=commute_hours).assign(daytype="주말")])
     print(bunch.round(3).to_string(index=False))
+    # 도로공사 데이터 효과: 모든 정류장 같은 몰림 vs 지나온 길 혼잡도 반영
+    road = m08.assumption_effect(features, cfg, "bunching_by_road", [False, True], model=model,
+                                 hours=commute_hours).assign(daytype="평일")
+    if features_we is not None:
+        road = pd.concat([road, m08.assumption_effect(features_we, cfg_we, "bunching_by_road", [False, True],
+                                                      model=model, hours=commute_hours).assign(daytype="주말")])
+    print(road.round(3).to_string(index=False))
+
+    step("11. 서비스: 상류 정류장 추천 + 대기 시간 부담 (평일)")
+    geom = m11.stop_geometry(stop_master, kec_stop)
+    rec = m11.recommend(model_scored, geom, commute_hours, c["service"])
+    burden = m11.wait_burden(model_scored, rec, c["service"])
+    print(rec[rec["saving_min"] > 0].round(1).to_string(index=False))
+    print(burden.round(1).to_string(index=False))
 
     step("10. 반출 패키지")
     run_params = {k: c[k] for k in ["bus_file", "daily_file", "flow_file", "wkdy_file", "std_ym", "radii", "ref_radius", "road_names", "sigungu_names", "taus"]}
@@ -313,8 +332,9 @@ def run(c: dict, dummy: bool = False) -> None:
             "model_scored": model_scored, "model": model, "diag": diag, "cfg": cfg,
             "model_scored_weekend": model_scored_we, "diag_weekend": diag_we, "cfg_weekend": cfg_we,
             "scored_by_dow": scored_dow,
+            "service_rec": rec, "wait_burden": burden, "service_cfg": c["service"],
             "cv": cv, "saturation": saturation, "sensitivity": sens, "rule_vs_model": rvm,
-            "kec_table": kec_table, "kec_stop": kec_stop, "bunching": bunch,
+            "kec_table": kec_table, "kec_stop": kec_stop, "bunching": bunch, "road_bunching": road,
             "run_params": run_params,
         },
         ROOT / c["export_dir"],

@@ -121,12 +121,14 @@ def _daytype_tables(scored: pd.DataFrame, kec_stop: pd.DataFrame, daytype: str, 
     }
 
 
-def _unmet_by_hour(scored: pd.DataFrame, kr: str) -> pd.DataFrame:
+def _unmet_by_hour(scored: pd.DataFrame, kr: str, seat_capacity: float = 41) -> pd.DataFrame:
     skt = scored[scored["has_skt"]]
     by_hour = skt.groupby("hour").agg(latent=("latent_daily", "sum"), unmet=("unmet_daily", "sum"))
     return pd.DataFrame({
         f"{kr}_추정_미승차_일평균_명(10명단위)": _round_to(by_hour["unmet"], 10),
         f"{kr}_미승차_비율_%": _round_to(100 * by_hour["unmet"] / by_hour["latent"].where(by_hour["latent"] > 0), 1),
+        # 미승차 인원을 모두 태우려면 그 시간에 필요한 추가 운행 대수 (좌석수 기준, 증차 비용 환산용)
+        f"{kr}_필요_추가운행_대수": _round_to(by_hour["unmet"] / seat_capacity, 0.1),
     }, index=by_hour.index)
 
 
@@ -169,6 +171,46 @@ def _dow_tables(scored_by_dow: dict) -> dict:
     }
 
 
+def _service_tables(r: dict, label_map: dict) -> dict:
+    """11번 서비스 결과: 기대 대기 시간표, 상류 정류장 추천, 대기 시간 부담."""
+    import importlib.util, sys
+    m11 = sys.modules.get("m_11ServiceRecommend")
+    scored = r["model_scored"]
+    waits = m11.add_expected_wait(scored) if m11 else scored
+    src = waits[waits["has_skt"] & waits["hour"].isin(COMMUTE_HOURS)].copy()
+    src["정류장"] = src["seq"].map(label_map)
+    wait_pivot = src.pivot_table(index="정류장", columns="hour", values="wait_total_min", aggfunc="first")
+    wait_pivot = wait_pivot.reindex([label_map[s] for s in sorted(src["seq"].unique())]).apply(lambda c: _round_to(c, 1))
+
+    rec = r["service_rec"]
+    rec = rec[rec["saving_min"] > 0].sort_values("saving_min", ascending=False).head(MAX_ROWS)
+    rec_tbl = pd.DataFrame({
+        "현재정류장": rec["seq"].map(label_map).to_numpy(),
+        "시간대": rec["hour"].to_numpy(),
+        "현재_기대대기_분": _round_to(rec["wait_here_min"], 1),
+        "추천정류장": rec["alt_seq"].astype(int).map(label_map).to_numpy(),
+        "도보_분": _round_to(rec["alt_walk_min"], 1),
+        "추천정류장_기대대기_분": _round_to(rec["alt_wait_min"], 1),
+        "차내이동_분": _round_to(rec["alt_ride_min"], 1),
+        "추천경로_총_분": _round_to(rec["alt_total_min"], 1),
+        "단축_분": _round_to(rec["saving_min"], 1),
+    })
+
+    b = r["wait_burden"]
+    burden_tbl = pd.DataFrame({
+        "시간대": b["hour"],
+        "하루_초과대기_인시간(10단위)": _round_to(b["excess_wait_person_hours_day"], 10),
+        "연간_초과대기_인시간(1000단위)": _round_to(b["excess_wait_person_hours_year"], 1000),
+        "추천이용시_하루절감_상한_인시간(10단위)": _round_to(b.get("saving_upper_person_hours_day", 0), 10),
+    })
+    sv = r.get("service_cfg", {})
+    return {
+        "18ExpectedWaitPivot": (wait_pivot, "[평일] 출퇴근 시간 정류장x시간대 기대 대기 시간(분) = 배차/2 x (1+몰림^2) + 만차 추가 대기", True),
+        "19ServiceRecommendation": (rec_tbl, f"[평일] 상류 정류장 추천: 도보(최대 {sv.get('max_walk_m', 800)}m) + 대기 + 차내 이동이 현재 대기보다 짧은 경우", False),
+        "20WaitBurdenByHour": (burden_tbl, f"[평일] 서울 도심 구간 시간대별 초과 대기 부담(인·시간)과 연간 환산(평일 {sv.get('workdays_per_year', 250)}일), 추천 전원 이용 시 절감 상한", False),
+    }
+
+
 def build_tables(r: dict) -> dict[str, tuple[pd.DataFrame, str, bool]]:
     """반출할 표를 만든다. {파일명: (표, 설명, 인덱스 저장 여부)}"""
     scored: pd.DataFrame = r["model_scored"]
@@ -180,9 +222,10 @@ def build_tables(r: dict) -> dict[str, tuple[pd.DataFrame, str, bool]]:
     if scored_we is not None:
         tables.update(_daytype_tables(scored_we, r["kec_stop"], "weekend", "b"))
 
-    unmet_tbl = _unmet_by_hour(scored, "평일")
+    seats = r["cfg"].seat_capacity
+    unmet_tbl = _unmet_by_hour(scored, "평일", seats)
     if scored_we is not None:
-        unmet_tbl = unmet_tbl.join(_unmet_by_hour(scored_we, "주말"))
+        unmet_tbl = unmet_tbl.join(_unmet_by_hour(scored_we, "주말", seats))
     unmet_tbl.index.name = "시간대"
     unmet_tbl = unmet_tbl.reset_index()
 
@@ -202,7 +245,7 @@ def build_tables(r: dict) -> dict[str, tuple[pd.DataFrame, str, bool]]:
     config_tbl["값"] = config_tbl["값"].astype(str)
 
     tables.update({
-        "04UnmetDemandByHour": (unmet_tbl, "서울 도심 구간 시간대별 추정 미승차 수요(평일/주말, 구간 합계, 10명 단위)", False),
+        "04UnmetDemandByHour": (unmet_tbl, "서울 도심 구간 시간대별 추정 미승차 수요(평일/주말, 구간 합계, 10명 단위)와 이를 태우는 데 필요한 추가 운행 대수", False),
         "05ModelCoefficients": (coef, "수요 복원 Poisson GLM 계수(평일 학습, 정류장·시간대·통근 효과, multiplier=exp(coef))", False),
         "06CvAblation": (r["cv"].round(4), "[평일] 교차검증(무작위 5-fold / 정류장 제외 LOSO): SKT 유동인구 신호 유무·변형별 오차 비교", False),
         "07Sensitivity": (r["sensitivity"].round(4), "[평일] 반경x tau x 신호 변형 민감도: 기준 대비 순위 상관·top10 겹침", False),
@@ -220,8 +263,14 @@ def build_tables(r: dict) -> dict[str, tuple[pd.DataFrame, str, bool]]:
         tables["14BunchingEffect"] = (
             r["bunching"].round(4),
             "버스 몰림 정도(CV)별 출퇴근 시간 탑승가능확률·위험/보통 칸 수 (0 = 몰림 없음, 기본 0.5)", False)
+    if r.get("road_bunching") is not None:
+        tables["15RoadCongestionBunching"] = (
+            r["road_bunching"].round(4),
+            "도로공사 혼잡 지수 반영 효과: 모든 정류장 같은 몰림(False) vs 지나온 길 혼잡도로 정류장별 몰림(True)", False)
     if r.get("scored_by_dow"):
         tables.update(_dow_tables(r["scored_by_dow"]))
+    if r.get("service_rec") is not None:
+        tables.update(_service_tables(r, label_map))
     return tables
 
 
@@ -330,6 +379,22 @@ def build_figures(r: dict, out_dir: Path, manifest: list) -> None:
     ax.legend(fontsize=8)
     ax.set_title("수요신호별 예측 오차 (정류장 제외 = 처음 보는 정류장 맞히기)")
     _save(fig, "F4CvAblation", "신호 변형별 교차검증 오차(무작위 5-fold / 정류장 제외)")
+
+    # F6 서비스: 가장 위험한 시간의 정류장별 기대 대기 시간 (현재 vs 상류 정류장 추천)
+    rec = r.get("service_rec")
+    if rec is not None and not rec.empty:
+        rh = rec[rec["hour"] == worst_hour].sort_values("seq")
+        _, _, lm = _stop_labels(scored)
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        x = np.arange(len(rh))
+        ax.bar(x - 0.2, rh["wait_here_min"], 0.4, label="지금 정류장에서 기다릴 때", color="#c05621")
+        alt = rh["alt_total_min"].where(rh["saving_min"] > 0)
+        ax.bar(x + 0.2, alt, 0.4, label="상류 정류장 추천 경로 (도보+대기+차내)", color="#2f855a")
+        ax.set_xticks(x, [lm[s] for s in rh["seq"]], rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel("버스에 타기까지 걸리는 시간 (분)")
+        ax.legend(fontsize=8)
+        ax.set_title(f"평일 {worst_hour}시 정류장별 기대 소요 시간 (초록 막대 = 추천이 더 빠른 경우)")
+        _save(fig, "F6ServiceRecommendation", f"평일 {worst_hour}시 정류장별 현재 기대 대기 vs 상류 정류장 추천 경로 소요 시간")
 
     # F5 설정을 바꿔도 순위가 유지되는가 (y축 0.8~1.0)
     sens = r["sensitivity"]

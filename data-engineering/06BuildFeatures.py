@@ -15,6 +15,9 @@ SKT 유동인구는 서울만 있으므로 서울 도심 구간 정류장만 남
 혼잡 노출 지수를 어떻게 붙이는가)
 - congestion_exposure_index: 노선 단위(경부선 구간) 숫자 하나 -> 모든 행에 같은 값
 - stop_congestion_index    : 정류장이 있는 동의 도로 기준 -> 정류장마다 다른 값 (seq로 붙임)
+- upstream_congestion_index: 그 정류장에 오기까지 지나온 길의 혼잡도 합 (09번 버스 몰림에 사용)
+    = 노선 단위 지수(경부고속도로 구간) + 서울 첫 정류장부터 그 정류장까지 정류장별 지수의 합
+    혼잡한 길을 많이 지나온 하류 정류장일수록 커짐 (버스 몰림은 노선을 따라갈수록 심해짐)
 둘 다 시간대 구분이 없는 데이터라 24시간 같은 값이다.
 
 CLI 예시:
@@ -109,6 +112,17 @@ def attach_stop_congestion_index(df: pd.DataFrame, kec_stop: pd.DataFrame | None
     return df.merge(kec_stop[["seq", "stop_congestion_index"]], on="seq", how="left")
 
 
+def attach_upstream_congestion(df: pd.DataFrame) -> pd.DataFrame:
+    """정류장마다 지나온 길의 혼잡도 합. 정류장 순서(seq)대로 누적."""
+    stops = df.drop_duplicates("seq").sort_values("seq")[["seq", "congestion_exposure_index", "stop_congestion_index"]]
+    if stops["stop_congestion_index"].isna().all():
+        return df.assign(upstream_congestion_index=np.nan)
+    stops["upstream_congestion_index"] = (
+        stops["congestion_exposure_index"].fillna(0) + stops["stop_congestion_index"].fillna(0).cumsum()
+    )
+    return df.merge(stops[["seq", "upstream_congestion_index"]], on="seq", how="left")
+
+
 # %%
 def merge_all(
     load_profile: pd.DataFrame,
@@ -126,6 +140,7 @@ def merge_all(
     merged = merge_route_share(merged, route_share)
     merged = attach_congestion_index(merged, kec_overall)
     merged = attach_stop_congestion_index(merged, kec_stop)
+    merged = attach_upstream_congestion(merged)
     merged = attach_weekday_profile(merged, wkdy_profile)
     return merged
 

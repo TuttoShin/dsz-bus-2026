@@ -37,6 +37,11 @@
        버스 1대 앞 대기 인원 = lambda x (1 + CV^2)
      CV = 0 이면 정확히 일정한 배차(몰림 없음), CV = 1 이면 완전히 무작위로 오는 수준
    - 실측 CV를 모르므로 기본 0.5로 두고, 08번에서 0 / 0.5 / 1을 비교한다
+   - 도로 혼잡 반영 (bunching_by_road, 한국도로공사 데이터)
+       버스 몰림은 길이 막혀서 생기고, 노선을 따라갈수록 심해진다
+       정류장별 CV = 기본 CV x (그 정류장 지나온 길 혼잡도 / 정류장 평균)   <- 06번 upstream_congestion_index
+       평균 CV는 기본값 그대로, 도로공사 데이터는 "어느 정류장에서 더 몰리는가"를 정한다
+       한계: 혼잡도 -> CV 변환은 버스 도착 기록이 없어 비례로 가정
 
 3. 추가 대기시간
    - 매 버스마다 확률 P로 탈 수 있다면, 놓치는 버스 수 평균 = 1/P - 1
@@ -124,7 +129,8 @@ class ModelConfig:
     signal: str = SIGNAL_DEFAULT
     use_commute: bool = True  # 통근 보정 (요일별 유동인구 필요)
     daytype: str = "all"  # "weekday" / "weekend" / 요일 "mon"~"sun" / "all"(구분 없음)
-    bunching_cv: float = 0.0  # 버스 몰림 정도 (0 = 일정한 배차)
+    bunching_cv: float = 0.0  # 버스 몰림 정도 (0 = 일정한 배차). 도로 반영 시 정류장 평균값
+    bunching_by_road: bool = False  # True면 지나온 길 혼잡도(도로공사)로 정류장마다 몰림 정도를 다르게
 
     @property
     def headway_mid(self) -> float:
@@ -337,10 +343,18 @@ def poisson_expected_min(lam: np.ndarray, r: np.ndarray, kmax: int) -> np.ndarra
 def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> pd.DataFrame:
     df = df.copy()
     kmax = int(cfg.seat_capacity)
+    # 정류장별 몰림 정도 (도로 혼잡 반영이면 지나온 길 혼잡도 비율만큼, 아니면 모든 정류장 같게)
+    cv = np.full(len(df), cfg.bunching_cv)
+    if cfg.bunching_by_road and df.get("upstream_congestion_index") is not None \
+            and df["upstream_congestion_index"].notna().any():
+        u = df["upstream_congestion_index"]
+        stop_mean = df.drop_duplicates("seq")["upstream_congestion_index"].mean()
+        cv = (cfg.bunching_cv * u / stop_mean).fillna(cfg.bunching_cv).to_numpy(float)
+    df["bunching_cv_stop"] = cv
     for tag, _ in _scenarios(cfg):
         h = df[f"headway_eff_{tag}"].to_numpy(float)
         # 버스 1대 앞 대기 인원 (몰림 효과 포함)
-        lam = df["latent_daily"].to_numpy(float) * h / 60.0 * (1 + cfg.bunching_cv ** 2)
+        lam = df["latent_daily"].to_numpy(float) * h / 60.0 * (1 + cv ** 2)
         r = np.floor(df[f"seats_avail_{tag}"].to_numpy(float))
         served = poisson_expected_min(lam, r, kmax)
         p = np.where(lam > 1e-9, served / np.maximum(lam, 1e-9), 1.0)
@@ -379,6 +393,7 @@ def run_model(
     diag = {
         "daytype": cfg.daytype,
         "bunching_cv": cfg.bunching_cv,
+        "bunching_by_road": cfg.bunching_by_road,
         "signal": cfg.signal,
         "use_commute": model.use_commute,
         "tau": cfg.tau,
