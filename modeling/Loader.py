@@ -13,7 +13,7 @@ ROOT = Path(os.path.abspath(__file__)).parents[1]
 
 
 def load_module(relpath: str) -> ModuleType:
-    """예: load_module('modeling/09BoardingProbability.py'). 한 번 불러온 파일은 다시 안 읽음."""
+    """예: load_module('modeling/07BoardingProbability.py'). 한 번 불러온 파일은 다시 안 읽음."""
     path = ROOT / relpath
     name = "m_" + path.stem
     if name in sys.modules:
