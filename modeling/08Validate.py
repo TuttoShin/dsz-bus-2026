@@ -5,12 +5,12 @@
 "못 탄 사람"은 데이터에 없어서 정답과 비교할 수가 없다. 대신 아래를 확인한다.
 결과는 전부 요약표라 반출 가능 (10번이 export/ 폴더로 옮김).
 
-1. cv_ablation: SKT 데이터를 넣으면 예측이 더 정확해지는가
-   - 자리가 넉넉했던 칸(실제 승차 = 수요)으로 학습하고 맞춰보기
+1. cv_ablation: SKT 데이터와 체류 목적 보정을 넣으면 정류장 대기 수요 예측이 더 정확해지는가
+   - 9401 자리가 넉넉했던 칸(정류장 전체 노선 승차 = 대기 수요)으로 학습하고 맞춰보기 (정류장 x 요일 x 시간대)
        무작위 5-fold   : 칸을 무작위로 5등분. 이미 본 정류장의 다른 시간대를 맞히는 시험
        정류장 제외(LOSO): 정류장 하나를 통째로 빼고 맞히는 시험 (노선을 넓힐 때 쓸 수 있는가)
    - no_skt보다 오차가 작으면 = SKT 데이터가 도움이 된다
-   - 체류 목적 보정을 넣어서 출퇴근 시간 오차가 작아지면 = 직장인 비중 반영이 도움이 된다
+   - flow_only(유동인구 x 평균 대기 비율)보다 stay(체류 목적 보정)가 작으면 = 정류장·요일·시간 배수가 도움이 된다
 
 2. saturation_curve: 버스가 찰수록 승차가 줄어드는가
    - 실제 승차 / 모델 예측 수요를 버스 도착 시 재차율 구간별로
@@ -51,15 +51,7 @@ m07 = load_module("modeling/07BoardingProbability.py")
 
 # 재차율(재차/좌석) 구간. 0.6 이상은 칸이 몇 개 안 돼서 하나로 합침
 SATURATION_BINS = [0, 0.2, 0.4, 0.6, np.inf]
-COMMUTE_PEAK_HOURS = [7, 8, 9, 17, 18, 19]  # 체류 목적 보정이 작동하는 시간 (07번 오전첨두·오후첨두)
-
-CV_VARIANTS = [  # (표에 쓸 이름, 수요신호, 체류 목적 보정)
-    ("no_skt", "no_skt", False),
-    ("flow", "flow", False),
-    ("flow_x_share_hourly", "flow_x_share_hourly", False),
-    ("flow_x_share", "flow_x_share", False),
-    ("flow_x_share+체류목적", "flow_x_share", True),
-]
+PEAK_HOURS = [7, 8, 9, 17, 18, 19]  # 출퇴근 첨두
 
 
 def _poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
@@ -69,46 +61,41 @@ def _poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
 
 
 # %%
-def cv_ablation(features: pd.DataFrame, cfg, k: int = 5, seed: int = 42) -> pd.DataFrame:
-    """두 가지 나눔(무작위 5-fold / 정류장 제외)으로 수요신호별 예측 오차 비교. 모든 신호가 같은 칸·같은 나눔.
+def cv_ablation(stay_features: dict, cfg, k: int = 5, seed: int = 42) -> pd.DataFrame:
+    """두 가지 나눔(무작위 5-fold / 정류장 제외)으로 수요 모델 변형별 정류장 대기 수요 예측 오차 비교.
 
+    칸 = 정류장 x 요일 x 시간대 중 9401 자리가 넉넉했던 칸 (정류장 전체 노선 승차 = 대기 수요)
     mae_improvement_vs_no_skt = 1 - (MAE / 같은 방식 no_skt의 MAE)   (0.2면 SKT 없을 때보다 오차 20% 감소)
-    mae_peak_hours: 출퇴근 첨두(7~9시, 17~19시) 칸만의 MAE. 체류 목적 보정 효과는 여기서 봐야 함
+    mae_peak_hours: 출퇴근 첨두(7~9시, 17~19시) 칸만의 MAE
     """
-    base = m07.add_capacity_terms(m07.add_demand_signal(features, "no_skt", cfg.daytype), cfg)
-    pool_idx = base.index[base["unconstrained"] & base["has_skt"]]
+    cells = m07.stay_cells(stay_features, cfg)
+    pool = cells[cells["unconstrained"] & (cells["flow_day"] > 0)].reset_index(drop=True)
     rng = np.random.default_rng(seed)
     splits = {
-        "무작위 5-fold": rng.integers(0, k, size=len(pool_idx)),
-        "정류장 제외(LOSO)": base.loc[pool_idx, "seq"].to_numpy(),
+        "무작위 5-fold": rng.integers(0, k, size=len(pool)),
+        "정류장 제외(LOSO)": pool["seq"].to_numpy(),
     }
-    return pd.concat([_cv_once(features, cfg, pool_idx, folds).assign(cv_type=name) for name, folds in splits.items()],
-                     ignore_index=True)
+    return pd.concat([_cv_once(pool, folds).assign(cv_type=name) for name, folds in splits.items()], ignore_index=True)
 
 
-def _cv_once(features: pd.DataFrame, cfg, pool_idx, folds: np.ndarray) -> pd.DataFrame:
+def _cv_once(pool: pd.DataFrame, folds: np.ndarray) -> pd.DataFrame:
     rows = []
-    for label, v, commute in CV_VARIANTS:
-        try:
-            df = m07.add_capacity_terms(m07.add_demand_signal(features, v, cfg.daytype), cfg).loc[pool_idx]
-        except ValueError as e:
-            print(f"{v} 생략: {e}")
-            continue
+    for v in m07.SIGNAL_VARIANTS:
         y_all, pred_all, hour_all = [], [], []
         for f in np.unique(folds):
-            train, test = df[folds != f], df[folds == f]
+            train, test = pool[folds != f], pool[folds == f]
             if test.empty or train.empty:
                 continue
-            model = m07.fit_demand_model(train, v, commute)
-            pred_all.append(model.predict(test))
-            y_all.append(test["daily_boarding"].to_numpy(float))
+            model = m07.fit_stay_model(train, v)
+            pred_all.append(model.predict_cells(test.reset_index(drop=True)))
+            y_all.append(test["station_board"].to_numpy(float))
             hour_all.append(test["hour"].to_numpy())
         y, pred = np.concatenate(y_all), np.concatenate(pred_all)
-        peak = np.isin(np.concatenate(hour_all), COMMUTE_PEAK_HOURS)
+        peak = np.isin(np.concatenate(hour_all), PEAK_HOURS)
         ss_res = np.sum((np.log1p(y) - np.log1p(pred)) ** 2)
         ss_tot = np.sum((np.log1p(y) - np.log1p(y).mean()) ** 2)
         rows.append({
-            "signal_variant": label,
+            "signal_variant": v,
             "n_cells": len(y),
             "mae_daily_boarding": float(np.mean(np.abs(y - pred))),
             "n_cells_peak": int(peak.sum()),
@@ -147,15 +134,15 @@ def saturation_curve(scored: pd.DataFrame) -> pd.DataFrame:
 
 
 # %%
-def sensitivity(features_by_radius: dict, cfg, ref_radius: float, taus: list[float], variants: list[str],
-                top_n: int = 10) -> pd.DataFrame:
-    """모든 설정 조합을 돌려서 기본 설정과 비교 (순위 상관, 위험 top10 겹침)."""
+def sensitivity(features_by_radius: dict, stay_by_radius: dict, cfg, ref_radius: float, taus: list[float],
+                variants: list[str], top_n: int = 10) -> pd.DataFrame:
+    """모든 설정 조합을 돌려서 기본 설정과 비교 (순위 상관, 위험 top10 겹침). 반경마다 체류 목적 보정도 다시 학습."""
     results = {}
     for radius, feats in features_by_radius.items():
         for tau in taus:
             for v in variants:
                 try:
-                    scored, _, diag = m07.run_model(feats, replace(cfg, tau=tau, signal=v))
+                    scored, _, diag = m07.run_model(feats, replace(cfg, tau=tau, signal=v, stay_features=stay_by_radius[radius]))
                 except ValueError as e:
                     print(f"sensitivity 생략 (r={radius}, tau={tau}, {v}): {e}")
                     continue
@@ -277,7 +264,7 @@ def reproduction_error(scored: pd.DataFrame) -> float:
 def time_split(ev: pd.DataFrame, make_features, cfg, test_from_day: int = TEST_FROM_DAY) -> tuple[dict, pd.DataFrame]:
     """② 시간 분할 검증: 1~3주 데이터만으로 모델·확률을 만들고, 4주차에 실제로 만석 버스가 나온 칸을 맞혔는가.
 
-    make_features(버스별 기록) -> 06번 features (RunAll이 넘김. 같은 SKT·분담률에 그 기간 버스 기록만)
+    make_features(버스별 기록) -> (평일 features, 요일별 features) (RunAll이 넘김. 같은 SKT·분담률에 그 기간 버스·정류장 승차만)
     반환: (요약 dict, 1~3주 등급별 4주차 만석 칸 비율 표)
     """
     day = ev["date"].str[6:8].astype(int)
@@ -285,8 +272,10 @@ def time_split(ev: pd.DataFrame, make_features, cfg, test_from_day: int = TEST_F
     if m07.events_for(ev_te, cfg.daytype)["date"].nunique() < 3:
         print(f"시간 분할 검증 생략: {test_from_day}일 이후 {cfg.daytype} 날짜가 3일 미만")
         return {}, pd.DataFrame()
-    sc_tr, model, _ = m07.run_model(make_features(ev_tr), replace(cfg, bus_events=ev_tr))
-    sc_te, _, _ = m07.run_model(make_features(ev_te), replace(cfg, bus_events=ev_te), model=model)
+    f_tr, stay_tr = make_features(ev_tr)
+    f_te, stay_te = make_features(ev_te)
+    sc_tr, model, _ = m07.run_model(f_tr, replace(cfg, bus_events=ev_tr, stay_features=stay_tr))
+    sc_te, _, _ = m07.run_model(f_te, replace(cfg, bus_events=ev_te, stay_features=stay_te), model=model)
     key = ["seq", "hour"]
     a = sc_tr[sc_tr["has_skt"] & (sc_tr["n_buses"] > 0)][key + ["grade", "p_board_mid"]]
     b = sc_te[sc_te["has_skt"] & (sc_te["n_buses"] > 0)][key + ["full_bus_share"]]
@@ -323,8 +312,8 @@ def demand_sensitivity(features: pd.DataFrame, cfg, model, scales=DEMAND_SCALES,
 
 
 def skt_contribution(features: pd.DataFrame, cfg, scored: pd.DataFrame) -> dict:
-    """④ SKT 기여: SKT 없이(대기 수요 = 승차 기록 + 정류장·시간대 효과) 돌렸을 때보다 위험 칸을 몇 개 더 잡는가."""
-    sc0, _, _ = m07.run_model(features, replace(cfg, signal="no_skt", use_commute=False))
+    """④ SKT 기여: SKT 없이(정류장 배수 x 요일·시간 배수만) 돌렸을 때보다 위험 칸을 몇 개 더 잡는가."""
+    sc0, _, _ = m07.run_model(features, replace(cfg, signal="no_skt"))
     risk = lambda d: set(d.loc[d["has_skt"] & (d["grade"] == "위험"), ["seq", "hour"]].itertuples(index=False, name=None))
     with_skt, without = risk(scored), risk(sc0)
     return {"SKT반영_위험칸수": len(with_skt), "SKT없이_위험칸수": len(without),

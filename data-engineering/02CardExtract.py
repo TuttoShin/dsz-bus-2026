@@ -82,17 +82,19 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
 
 # %%
 def extract(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_ids: set[str] | None = None,
-            card_ym: str | None = None, holidays: list[str] | None = None) -> dict:
+            card_ym: str | None = None, aliases: dict | None = None) -> dict:
     """한 번 훑어서 9401 후보 노선 행 + 9401 정류장 전체 노선 승차 집계 + 서울 정류장끼리 오간 기록.
 
-    반환 {"card": 9401 행, "route_id": 고른 노선ID, "stop_board": 정류장x시간대x9401여부 승차 합,
+    반환 {"card": 9401 행, "route_id": 고른 노선ID, "stop_board": 정류장x시간대x9401여부x날짜 승차 합,
           "pair_trips": 서울 정류장 A->B 이동 집계, "n_rows": 전체 행 수, "days": 날짜 범위}
     card_ym (예: "202408")을 주면 그 달 운행일자만 쓴다 (SKT와 같은 달로 맞춤)
     노선ID는 앞자리 0을 떼고 비교한다 (노선 정보와 교통카드의 표기 차이 대비)
-    holidays (예: ["20240815"])는 정류장별 승차 집계에서 평일이 아닌 날로 친다 (평일 점유율 계산용)
+    stop_board는 날짜별로 남긴다 (요일별 정류장 대기 수요·평일 점유율·시간 분할 검증에 씀)
+    aliases = {다른 정산사업자 정류장ID: 9401 정류장ID} (01번 stop_aliases). 정류장별 승차·정류장 간 이동에 합쳐 센다
     """
     norm = _m01().norm_id
-    holidays = set(holidays or [])
+    aliases = aliases or {}
+    alias_users, stop_users = 0, 0
     ids = {str(r).strip().lstrip("0") for r in route_ids}
     n_other_month = 0
     seoul_ids = seoul_ids or set()
@@ -108,17 +110,20 @@ def extract(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_i
         df = df.assign(route=df["route"].str.lstrip("0"))
         keep.append(df[df["route"].isin(ids)])
         g = norm(df["gin_stop"])
+        if aliases:  # 같은 정류장 다른 ID -> 9401 정류장ID
+            is_alias = g.isin(aliases.keys())
+            alias_users += int(df.loc[is_alias, "users"].sum())
+            g = g.where(~is_alias, g.map(aliases))
         at = df[g.isin(stop_ids)].assign(stop=g[g.isin(stop_ids)])
+        stop_users += int(at["users"].sum())
         if len(at):
             at["hour"] = pd.to_numeric(at["gin_dt"].str[8:10], errors="coerce")
             at["is_route"] = at["route"].isin(ids)
-            # 평일 여부 (월~금, 공휴일 제외). 날짜마다 한 번만 계산
-            ud = pd.Series(at["date"].unique())
-            wd = (pd.to_datetime(ud.str[:8], format="%Y%m%d", errors="coerce").dt.dayofweek < 5) & ~ud.str[:8].isin(holidays)
-            at["weekday"] = at["date"].map(dict(zip(ud, wd)))
-            share.append(at.groupby(["stop", "hour", "is_route", "route", "weekday"])["users"].sum())
+            share.append(at.assign(date=at["date"].str[:8]).groupby(["stop", "hour", "is_route", "route", "date"])["users"].sum())
         # 서울 정류장 A에서 타서 서울 정류장 B에서 내린 기록 (모든 노선)
         o = norm(df["gff_stop"])
+        if aliases:
+            o = o.where(~o.isin(aliases.keys()), o.map(aliases))
         ab = df[g.isin(seoul_ids) & o.isin(seoul_ids) & (g != o)].assign(a=g, b=o)
         if len(ab):
             t0 = pd.to_datetime(ab["gin_dt"].str[:14], format="%Y%m%d%H%M%S", errors="coerce")
@@ -156,7 +161,7 @@ def extract(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_i
         rt = stop_board.assign(route=stop_board["route"].where(~stop_board["is_route"], chosen))
         rt = rt.groupby(["stop", "route"])["users"].sum()
         stop_routes = rt[rt >= 30].groupby(level=0).size()
-        stop_board = stop_board.groupby(["stop", "hour", "is_route", "weekday"])["users"].sum().reset_index()
+        stop_board = stop_board.groupby(["stop", "hour", "is_route", "date"])["users"].sum().reset_index()
     pair_trips = pd.DataFrame()
     if pairs:
         pair_trips = pd.concat(pairs).groupby(level=[0, 1, 2, 3, 4, 5]).sum().reset_index()
@@ -166,6 +171,7 @@ def extract(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_i
         pair_trips.loc[pair_trips["route"].isin(merged), "route"] = chosen
     return {"card": card, "route_id": chosen, "route_ids_merged": merged, "route_counts": route_counts,
             "stop_board": stop_board, "stop_routes": stop_routes, "pair_trips": pair_trips, "n_rows": n_rows,
+            "alias_board_share": alias_users / stop_users if stop_users else 0.0,  # 9401 정류장 승차 중 통합 ID로 들어온 비율
             "days": f"{days[0]} ~ {days[-1]}" if days else ""}
 
 

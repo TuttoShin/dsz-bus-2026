@@ -1119,8 +1119,8 @@ def s18_validation(r: dict, save) -> None:
 
 
 # 18쪽 S18b: 08번 교차검증 변형을 하나씩 더해가는 순서로 (마지막 = 최종 모델)
-CV_STEPS = [("no_skt", "SKT 없이\n(승차 기록 +\n정류장·시간대 효과)"), ("flow", "+ 유동인구"),
-            ("flow_x_share", "+ 9401 점유율"), ("flow_x_share+체류목적", "+ 체류 목적 보정\n(최종 모델)")]
+CV_STEPS = [("no_skt", "SKT 없이\n(정류장 배수 x\n요일·시간 배수)"), ("flow_only", "유동인구 x\n평균 대기 비율"),
+            ("stay", "+ 체류 목적 보정\n(정류장·요일·시간 배수,\n최종 모델)")]
 CV_TYPES = [("무작위 5-fold", "아는 정류장의 다른 시간대 맞히기\n(무작위 5-fold)"),
             ("정류장 제외(LOSO)", "처음 보는 정류장 맞히기\n(정류장 하나씩 빼고 학습)")]
 
@@ -1145,13 +1145,13 @@ def s18_cv(r: dict, save) -> None:
             _bar_label(ax, i, v, lab)
         ax.set_xticks(x, [lab for _, lab in steps], fontsize=8)
         ax.set_ylim(0, np.nanmax(vals) * 1.3 if np.isfinite(vals).any() else 1)
-        ax.set_ylabel("예측 오차 MAE (칸당 하루 승차, 명)")
+        ax.set_ylabel("예측 오차 MAE (칸당 하루 정류장 승차, 명)")
         ax.grid(axis="x", visible=False)
         ax.set_title(title, fontsize=10)
-    fig.suptitle("수요 모델 구성별 교차검증 오차 (평일)", fontsize=12, y=1.03)
-    _deck_note(fig, "자리 넉넉 칸(실제 승차 = 수요)만 사용. 괄호 = SKT 없이 대비 오차 변화(음수 = 개선). "
+    fig.suptitle("수요 모델 구성별 정류장 대기 수요 교차검증 오차 (요일 전체)", fontsize=12, y=1.03)
+    _deck_note(fig, "정류장 x 요일 x 시간대 중 9401 자리 넉넉 칸(정류장 전체 노선 승차 = 대기 수요)만 사용. 괄호 = SKT 없이 대비 오차 변화(음수 = 개선). "
                     "무작위 5-fold = 칸을 5등분해 4개로 학습·1개로 시험, 정류장 제외 = 정류장 하나를 통째로 빼고 학습해 그 정류장을 맞힘")
-    save(fig, "S18bCvByModelStep", "[장표18] 수요 모델 구성(SKT 없이 / +유동인구 / +9401 점유율 / +체류 목적 보정)별 교차검증 오차")
+    save(fig, "S18bCvByModelStep", "[장표18] 수요 모델 구성(SKT 없이 / 유동인구 x 평균 대기 비율 / +체류 목적 보정)별 정류장 대기 수요 교차검증 오차")
 
 
 def s19_results(r: dict, save) -> None:

@@ -240,6 +240,38 @@ def add_direction(df: pd.DataFrame, turnaround_name: str) -> pd.DataFrame:
     return df
 
 
+def stop_aliases(stop_file: Path, stops: pd.DataFrame, radius_m: float = 30.0) -> dict:
+    """장표 17쪽 '통합': 정산사업자마다 같은 정류장을 다른 정류장ID로 쓰는 경우를 9401 정류장ID로 합친다.
+
+    정류장 정보에서 9401 정류장과 이름(공백·기호 무시)이 같고 radius_m 안에 있는 다른 ID를 찾는다.
+    (길 건너 반대 방향 정류장은 보통 50m 넘게 떨어져 있어서 섞이지 않게 30m로)
+    반환: {다른 정류장ID: 9401 정류장ID}
+    """
+    base = stops.dropna(subset=["utmk_x"]).drop_duplicates("sttn_id").copy()
+    base["key"] = base["stop_name"].map(_norm_name)
+    st = read_filtered(stop_file, STOP_COLS, "정류장 정보", "name",
+                       lambda s: s.fillna("").map(_norm_name).isin(set(base["key"])), required=("sttn_id", "name"))
+    st["sttn_id"] = norm_id(st["sttn_id"])
+    st = st[~st["sttn_id"].isin(set(base["sttn_id"]))].drop_duplicates("sttn_id", keep="last")
+    if st.empty or "x" not in st or "y" not in st:
+        return {}
+    lat, lon = _lat_lon(st["x"], st["y"])
+    st = st.assign(lat=lat.to_numpy(), lon=lon.to_numpy()).dropna(subset=["lat", "lon"])
+    if st.empty:
+        return {}
+    x, y = _TRANSFORMER.transform(st["lon"].to_numpy(), st["lat"].to_numpy())
+    st = st.assign(utmk_x=x, utmk_y=y, key=st["name"].map(_norm_name))
+    out = {}
+    for r in st.itertuples(index=False):
+        same = base[base["key"] == r.key]
+        if same.empty:
+            continue
+        d = np.hypot(same["utmk_x"] - r.utmk_x, same["utmk_y"] - r.utmk_y)
+        if d.min() <= radius_m:
+            out[r.sttn_id] = same["sttn_id"].iloc[int(np.argmin(d.to_numpy()))]
+    return out
+
+
 VIRTUAL_SEGMENT = "가상정류장"
 
 

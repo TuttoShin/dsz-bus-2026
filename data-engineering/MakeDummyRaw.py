@@ -14,6 +14,7 @@ MakeDummyRaw.py
                        순천향대학병원 두 정류장(seq28, seq38)은 같은 정류장ID로 만들어서 구분 로직을 확인
                        다른 노선 승차도 섞어서 9401 분담률을 계산할 수 있게
                        성남 방향 정류장에서 서울역 쪽으로 거꾸로 가는 다른 노선도 넣음 (09번 버스로 옮겨 타기 확인)
+                       경기 노선은 세종문화회관·명동.롯데영프라자를 다른 정류장ID(7로 시작, 10m 옆)로 씀 (01번 통합 확인)
   dummyFlowTime.csv    SKT 시간대별 유동인구 (서울 정류장 주변 3x3 셀)
   dummyFlowWkdy.csv    SKT 요일별 유동인구
 
@@ -74,6 +75,9 @@ BOARD_SHAPE = {
 }
 
 
+ALIAS_NAMES = ["세종문화회관", "명동.롯데영프라자"]  # 경기 노선이 다른 정류장ID로 쓰는 정류장
+
+
 def _stop_table() -> pd.DataFrame:
     s = pd.DataFrame(STOPS, columns=["seq", "name", "ars", "lat", "lon", "board_m", "alight_m"])
     s["seg"] = np.select([s["seq"] < 28, s["seq"] > 38], ["out", "in"], "seoul")
@@ -112,7 +116,11 @@ def make_dummy_masters(s: pd.DataFrame) -> None:
     st = s.drop_duplicates("sttn_id")
     vt = pd.DataFrame({"sttn_id": [f"99{q:04d}" for q, *_ in virtual], "name": [v[1] for v in virtual],
                        "area": "1165010100", "ars": "", "lat": [v[2] for v in virtual], "lon": [v[3] for v in virtual]})
-    st = pd.concat([st, vt], ignore_index=True)
+    # 다른 정산사업자가 같은 정류장을 다른 ID로 쓰는 경우 (이름 같고 약 10m 옆) -> 01번 stop_aliases가 합치는지
+    al = st[st["name"].isin(ALIAS_NAMES)].copy()
+    al["sttn_id"] = "7" + al["sttn_id"].str[1:]
+    al["lat"] = al["lat"] + 0.0001
+    st = pd.concat([st, vt, al], ignore_index=True)
     pd.DataFrame({
         "OPRAT_DATE": "20240801000000", "TCBO_ID": "01", "EXCCLC_AREA_CD": "MM10100000", "TFCMN_GB_CD": "1",
         "STTN_ID": st["sttn_id"], "STTN_NMA": st["name"].str.replace(".", " ", regex=False), "USE_AREA_CD": st["area"],
@@ -192,7 +200,14 @@ def make_dummy_card(s: pd.DataFrame, ym: str = "202408") -> None:
     rev["TCBO_CAR_ID"] = [f"9{k:03d}" for k in rng.integers(1, 40, len(rev))]
     rev["TCBO_GFF_STTN_ID"] = ids[off_pos]
     rev["GFF_DT"] = (t_on + pd.to_timedelta((gin_pos - off_pos) * 3 * 60, unit="s")).dt.strftime("%Y%m%d%H%M%S").to_numpy()
-    card = pd.concat([card, other, rev], ignore_index=True)
+    # 경기 노선: 같은 정류장을 다른 ID(7...)로 기록 (장표 17쪽 통합 대상)
+    alias_of = {sid: "7" + sid[1:] for sid in s.loc[s["name"].isin(ALIAS_NAMES), "sttn_id"]}
+    gg = card[card["TCBO_GIN_STTN_ID"].isin(alias_of)].sample(frac=0.5, random_state=3).copy()
+    gg["TCBO_GIN_STTN_ID"] = gg["TCBO_GIN_STTN_ID"].map(alias_of)
+    gg["TCBO_ROUTE_ID"] = "4100007000"
+    gg["TCBO_ID"] = "02"
+    gg["TCBO_CAR_ID"] = "7001"
+    card = pd.concat([card, other, rev, gg], ignore_index=True)
     card.to_csv(RAW_DIR / "dummyCard.csv", index=False, encoding="utf-8")
     print(f"dummy card saved: {len(card):,} rows")
 

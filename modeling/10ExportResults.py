@@ -27,6 +27,7 @@ FORBIDDEN_COLUMNS = {
     "flow_mon", "flow_tue", "flow_wed", "flow_thu", "flow_fri", "flow_sat", "flow_sun", "signal", "n_cells_matched",
     "boarding", "alighting", "net", "daily_boarding", "load_lower", "load_before_board", "load_before",
     "route_max_load_hour", "per_bus_load", "latent_daily", "demand_pred", "unmet_daily", "station_demand_daily", "flow_day",
+    "station_board", "station_pred", "n_total",
     "sttn_id", "ars", "lat", "lon", "utmk_x", "utmk_y", "X_COORD", "Y_COORD",
     "car", "trip_key", "gin_dt", "gff_dt", "gin_stop", "gff_stop", "users", "gap_min",
 }
@@ -232,9 +233,12 @@ def build_tables(r: dict, m09) -> dict[str, tuple[pd.DataFrame, str, bool]]:
     coef = r["model"].coef_table().copy()
     coef["term"] = coef["term"].str.replace(r"seq(\d+)", lambda m: label_map.get(int(m.group(1)), m.group(0)), regex=True)
     coef[["coef", "multiplier"]] = coef[["coef", "multiplier"]].round(4)
+    dh = r["model"].dow_hour_table().round(3)
+    dh.index = [DOW_KR[k] for k in dh.index]
+    dh.index.name = "요일"
 
     def _plain(d: dict) -> dict:  # 버스별 기록(DataFrame) 같은 큰 값은 빼고
-        return {k: v for k, v in d.items() if not isinstance(v, (pd.DataFrame, pd.Series))}
+        return {k: v for k, v in d.items() if not isinstance(v, (pd.DataFrame, pd.Series, dict))}
 
     items = _plain({**vars(r["cfg"]), **r["diag"], **r.get("run_params", {})})
     if r.get("diag_weekend"):
@@ -255,7 +259,8 @@ def build_tables(r: dict, m09) -> dict[str, tuple[pd.DataFrame, str, bool]]:
 
     tables.update({
         "04UnmetDemandByHour": (unmet.reset_index(), "서울 도심 구간 시간대별 추정 미승차 수요(평일/주말, 구간 합계, 10명 단위)와 이를 태우는 데 필요한 추가 운행 대수", False),
-        "05ModelCoefficients": (coef, "수요 복원 Poisson GLM 계수(평일 학습, 정류장·시간대·체류 목적 효과, multiplier=exp(coef))", False),
+        "05ModelCoefficients": (coef, "체류 목적 보정(포아송 회귀): 기준 대기 비율(정류장 대기 수요 ÷ 유동인구)과 정류장 배수 (multiplier=exp(coef))", False),
+        "05bDowHourMultiplier": (dh, "체류 목적 보정: 요일 x 시간대 배수 (같은 요일·시간대의 다른 정류장에서 학습, 1 = 평균)", True),
         "06CvAblation": (r["cv"].round(4), "[평일] 교차검증(무작위 5-fold / 정류장 제외 LOSO): SKT 유동인구 신호 유무·변형별 오차 비교", False),
         "07Sensitivity": (r["sensitivity"].round(4), "[평일] 반경 x tau x 신호 변형 민감도: 기준 대비 순위 상관·top10 겹침", False),
         "08SaturationCurve": (r["saturation"].round(4), "[평일] 버스 도착 시 재차율 구간별 실제 승차 / 예측 수요 (1보다 작으면 자리가 없어 덜 탐)", False),
@@ -448,11 +453,21 @@ def _deck_numbers(r: dict, label_map: dict) -> pd.DataFrame:
     add(16, "유동인구 중 정류장 대기 수요 비율 (서울 도심, 평일 / 주말)", f"{ratio(sc, col=st):.1%} / {ratio(we_sc, col=st):.1%}")
     skt = sc[sc["has_skt"] & (sc["n_buses"] > 0)]
     con = skt[~skt["unconstrained"]]
-    add(16, "[평일] 만석 도착 칸(자리 넉넉 기준 밖) / 전체 칸", f"{len(con)} / {len(skt)} ({len(con) / max(len(skt), 1):.0%})")
+    m = r["model"]
+    add(16, "만석 도착 칸 / 전체 칸 (정류장 x 요일 x 시간대, 운행·유동인구 있는 칸)",
+        f"{m.n_full} / {m.n_cells} ({m.n_full / max(m.n_cells, 1):.0%})")
+    add(16, "기준 대기 비율 (정류장 대기 수요 ÷ 유동인구, 배수 평균일 때)", f"{np.exp(m.base):.1%}")
     if con["daily_boarding"].sum() > 0:
         add(16, "[평일] 만석 칸 복원 대기 수요 ÷ 승차 기록", f"{con['latent_daily'].sum() / con['daily_boarding'].sum() - 1:+.0%}")
     # 17
     add(17, "유동인구 중 9401 대기 수요 비율 (서울 도심, 평일 / 주말)", f"{ratio(sc):.2%} / {ratio(we_sc):.2%}")
+    q = r.get("card_quality", {})
+    add(17, "통합: 다른 정산사업자 정류장ID 수 / 통합 ID로 연결된 승차 비율",
+        f"{q.get('통합한_정류장ID_수', 0)}개 / {q.get('통합ID로_연결된_승차_비율', 0):.1%}")
+    dg = r["diag"]
+    if dg.get("n_share_cells"):
+        add(17, "점유율 대체 칸 (정류장 x 요일 x 시간대): 소수 칸 / 만석 도착 칸 / 전체",
+            f"{dg['n_share_few']} / {dg['n_share_full']} / {dg['n_share_cells']}")
     sh = r.get("share")
     if sh is not None:
         s0 = sh.drop_duplicates("seq").set_index("seq").reindex(seoul)
