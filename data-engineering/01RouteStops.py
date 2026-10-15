@@ -15,7 +15,8 @@
 4. 서울 정류장 = 법정동코드가 11로 시작 (서울특별시). 없으면 좌표로 판단
    서울 첫 정류장 ~ 마지막 정류장 = 서울_도심루프, 그 앞 = 성남_상행, 뒤 = 성남_하행
    SKT 유동인구는 서울만 있어서 분석은 서울_도심루프만 한다 (성남 구간은 재차 계산에만 씀)
-5. 방향: 9401은 서울역버스환승센터에서 회차한다. 그 전까지는 서울역 방향(진입), 그 정류장부터는 성남 방향(진출)
+5. 가상 정류장(이름에 "가상", 숫자뿐인 이름, 승하차 태그가 한 번도 없는 곳)은 분석에서 뺀다 (mark_virtual)
+6. 방향: 9401은 서울역버스환승센터에서 회차한다. 그 전까지는 서울역 방향(진입), 그 정류장부터는 성남 방향(진출)
    09번 추천 서비스는 같은 방향 정류장끼리만 비교한다
 
 컬럼 이름은 정의서 그대로 (영어 코드, 또는 "운행일자(OPRAT_DATE)" 같은 한글+영어 표기 둘 다 찾음).
@@ -236,6 +237,26 @@ def add_direction(df: pd.DataFrame, turnaround_name: str) -> pd.DataFrame:
                   f"서울 첫 정류장에서 가장 먼 seq{turn} {seoul.loc[d.idxmax(), 'stop_name']}을 회차로 봄 (CONFIG turnaround_name 확인)")
         df.loc[g.index, "direction"] = np.where(g["seq"] < turn, "in", "out")
         df.loc[g.index, "turn_seq"] = turn
+    return df
+
+
+VIRTUAL_SEGMENT = "가상정류장"
+
+
+def mark_virtual(stops: pd.DataFrame, events: pd.DataFrame | None = None) -> pd.DataFrame:
+    """가상 정류장(요금·위치 계산용으로 노선에만 있고 사람이 타고 내리지 않는 곳)을 분석에서 뺀다.
+
+    가상 = 이름에 "가상"이 있거나, 이름이 숫자뿐이거나(예: 8502913), 한 달 동안 승하차 태그가 한 번도 없는 정류장
+    버스 재차 계산(03번)에는 그대로 두고, 구간 이름만 "가상정류장"으로 바꿔서 서울 도심 분석·추천·그림에서 빠지게 한다.
+    """
+    df = stops.copy()
+    name = df["stop_name"].astype(str)
+    virtual = name.str.contains("가상") | name.str.fullmatch(r"\s*\d+\s*")
+    if events is not None and len(events):
+        tapped = events.groupby("seq")["arr_observed"].any()
+        virtual |= ~df["seq"].map(tapped).fillna(False).astype(bool)
+    df["is_virtual"] = virtual
+    df.loc[virtual, "segment"] = VIRTUAL_SEGMENT
     return df
 
 

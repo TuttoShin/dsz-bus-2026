@@ -100,8 +100,19 @@ def make_dummy_masters(s: pd.DataFrame) -> None:
                          "ROUTE_NMA": "9401", "TFCMN_GB_CD": "1", "STTN_SEQ": r.seq + shift, "STTN_ID": r.sttn_id,
                          "ROUTE_NO": r.name, "STTN_X_XYZ": f"{r.lat:.6f}", "STTN_Y_XYZ": f"{r.lon:.6f}",
                          "STTN_ARSNO": r.ars, "ROUTE_ACM_DST": 0, "STTN_DST": 0})
+    # 가상 정류장 (고속도로 위, 서초구 법정동, 승하차 없음) -> 01번 mark_virtual이 빼는지 확인
+    virtual = [(24, "서초IC(가상)", 37.47, 127.03), (25, "8502913", 37.49, 127.02), (26, "한남대교(가상)", 37.52, 127.01),
+               (39, "한남대교(가상)", 37.52, 127.012), (40, "서초IC(가상)", 37.47, 127.032), (41, "옛골(가상)", 37.44, 127.06)]
+    for q, name, lat, lon in virtual:
+        rows.append({"OPRAT_DATE": "20240801000000", "TCBO_ID": "01", "EXCCLC_AREA_CD": "MM10100000", "ROUTE_ID": ROUTE_ID,
+                     "ROUTE_NMA": "9401", "TFCMN_GB_CD": "1", "STTN_SEQ": q, "STTN_ID": f"99{q:04d}",
+                     "ROUTE_NO": name, "STTN_X_XYZ": f"{lat:.6f}", "STTN_Y_XYZ": f"{lon:.6f}",
+                     "STTN_ARSNO": "", "ROUTE_ACM_DST": 0, "STTN_DST": 0})
     pd.DataFrame(rows).to_csv(RAW_DIR / "dummyRouteStop.csv", index=False, encoding="utf-8")
     st = s.drop_duplicates("sttn_id")
+    vt = pd.DataFrame({"sttn_id": [f"99{q:04d}" for q, *_ in virtual], "name": [v[1] for v in virtual],
+                       "area": "1165010100", "ars": "", "lat": [v[2] for v in virtual], "lon": [v[3] for v in virtual]})
+    st = pd.concat([st, vt], ignore_index=True)
     pd.DataFrame({
         "OPRAT_DATE": "20240801000000", "TCBO_ID": "01", "EXCCLC_AREA_CD": "MM10100000", "TFCMN_GB_CD": "1",
         "STTN_ID": st["sttn_id"], "STTN_NMA": st["name"].str.replace(".", " ", regex=False), "USE_AREA_CD": st["area"],

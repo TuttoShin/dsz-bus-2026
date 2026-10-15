@@ -4,10 +4,9 @@
 07번 탑승가능확률을 경로 안내 서비스로 바꾼다. (PPT 22~24쪽, 31쪽)
 "가장 가까운 정류장"이 아니라 "9401에 올라타서 서울을 빠져나가기까지 가장 빠른 정류장"을 안내한다.
 
-1. 정류장·시간대별 9401 기대 대기 시간 (분)
-     기본 대기 = 실제 평균 배차간격 / 2 x (1 + 몰림 정도^2)   (교통카드 실측. 버스가 몰려 오면 평균 대기도 길어짐)
-     추가 대기 = 실제 평균 배차간격 x (1/탑승가능확률 - 1)    (만차로 보내는 버스 수만큼, 07번 extra_wait)
-     기대 대기 = 기본 대기 + 추가 대기
+1. 정류장·시간대별 9401 기대 대기 시간 (분) = 07번 줄 서기 결과
+     실제로 온 버스 순서와 버스마다 남은 좌석으로, 정류장에 도착해서 실제로 탈 때까지 걸린 시간
+     (만석 버스가 연달아 오면 그만큼 길어지고, 앞에서 못 탄 사람이 줄에 남아 있는 것도 반영)
 
 2. 방향 (01번 direction)
    9401은 서울역버스환승센터에서 회차한다.
@@ -35,6 +34,7 @@
 4. 위치 기반 (정류장에 없어도)
    성남으로 가는 사람을 위한 안내 -> 성남 방향(회차 정류장 ~ 서울 마지막 정류장)만 후보
    예시 위치(지하철역 등, CONFIG service_points)와 도심 격자(100m 간격)마다 같은 식으로 계산
+   2~4번 모두 07번 10분 단위 결과로 계산한다 ("18:20에 도착하면 어디로")
    -> "을지로입구역에서는 가까운 명동성당보다 서울역환승센터로 가는 게 빠르다" 같은 안내
 
 5. 대기 시간 부담 (기대효과용)
@@ -66,8 +66,15 @@ _TF = Transformer.from_crs(4326, 5179, always_xy=True)
 
 # %%
 def add_expected_wait(scored: pd.DataFrame) -> pd.DataFrame:
-    """정류장·시간대별 9401 기대 대기 시간."""
+    """정류장·시간대별 9401 기대 대기 시간.
+
+    07번 줄 서기 결과(wait_total_min)가 있으면 그대로 쓴다: 실제 버스 순서·좌석으로 계산한 "도착해서 탈 때까지".
+    없으면 (예전 방식) 배차/2 x (1 + 몰림^2) + 추가 대기
+    """
     df = scored.copy()
+    if "wait_total_min" in df:
+        df["wait_base_min"] = df["wait_next_min"]
+        return df
     cv = df["gap_cv"].fillna(0.0)
     df["wait_base_min"] = df["headway_obs"] / 2 * (1 + cv ** 2)
     df["wait_total_min"] = df["wait_base_min"] + df["extra_wait_min_mid"]
@@ -118,6 +125,22 @@ def _bus_day(day: str) -> str:
 
 
 # %%
+def _waits(src: pd.DataFrame, hours: list[int], g: pd.DataFrame) -> pd.DataFrame:
+    """대기 시간 출처. 07번 10분 단위 표(slot 컬럼)가 오면 10분 단위로, 시간대 표가 오면 시간대로.
+
+    반환 컬럼: seq, key(10분 칸 또는 시간), hour, time("18:20"), wait_total_min
+    """
+    if "slot" in src.columns:
+        w = src[src["hour"].isin(hours) & src["seq"].isin(g.index)].copy()
+        w["key"] = w["slot"]
+    else:
+        w = add_expected_wait(src)
+        w = w[w["has_skt"] & w["hour"].isin(hours) & w["seq"].isin(g.index)].copy()
+        w["key"] = w["hour"]
+        w["time"] = w["hour"].map(lambda h: f"{int(h):02d}:00")
+    return w
+
+
 def _options(access: dict, wait: dict, to_end: dict) -> list:
     """선택지별 총 시간. access = {u: (이동 분, 이동 수단)}"""
     rows = []
@@ -129,14 +152,17 @@ def _options(access: dict, wait: dict, to_end: dict) -> list:
 
 def recommend(scored: pd.DataFrame, g: pd.DataFrame, hours: list[int], sv: dict | None = None,
               ride_tbl: dict | None = None, other_bus: dict | None = None, day: str = "weekday") -> pd.DataFrame:
-    """정류장에 있는 사람: 지금 정류장에서 기다리기 vs 다른 9401 정류장으로 (버스·도보) 옮겨서 타기."""
+    """정류장에 있는 사람: 지금 정류장에서 기다리기 vs 다른 9401 정류장으로 (버스·도보) 옮겨서 타기.
+
+    scored 자리에 07번 10분 단위 표(diag["slots"])를 넘기면 10분 단위로 계산 ("18:20에 도착하면")
+    """
     sv = {**SERVICE_DEFAULTS, **(sv or {})}
-    w = add_expected_wait(scored)
-    w = w[w["has_skt"] & w["hour"].isin(hours) & w["seq"].isin(g.index)]
+    w = _waits(scored, hours, g)
     bday = _bus_day(day)
     rows = []
     dirs = {d: direction_stops(g, d) for d in ("in", "out") if (g["direction"] == d).any()}
-    for hour, wh in w.groupby("hour"):
+    for key, wh in w.groupby("key"):
+        hour, time = int(wh["hour"].iloc[0]), wh["time"].iloc[0]
         wait = wh.set_index("seq")["wait_total_min"].to_dict()
         ends = {d: ride_to_end(g, int(hour), sv, ride_tbl, end) for d, (_, end) in dirs.items()}
         for s in g.index:
@@ -165,7 +191,8 @@ def recommend(scored: pd.DataFrame, g: pd.DataFrame, hours: list[int], sv: dict 
             best = min(opts, key=lambda o: o[5])
             ok = best[0] != s and here[5] - best[5] >= sv["min_saving_min"]
             rows.append({
-                "seq": s, "direction": d_s, "hour": int(hour), "wait_here_min": here[3], "total_here_min": here[5],
+                "seq": s, "direction": d_s, "hour": hour, "slot": key, "time": time,
+                "wait_here_min": here[3], "total_here_min": here[5],
                 "alt_seq": best[0] if ok else np.nan, "alt_mode": best[2] if ok else "",
                 "alt_access_min": best[1] if ok else np.nan, "alt_wait_min": best[3] if ok else np.nan,
                 "alt_extra_ride_min": (best[4] - here[4]) if ok else np.nan,
@@ -191,15 +218,15 @@ def recommend_from_points(scored: pd.DataFrame, g: pd.DataFrame, pts: pd.DataFra
     sv = {**SERVICE_DEFAULTS, **(sv or {})}
     if not (g["direction"] == "out").any():
         print("⚠ 성남 방향 정류장이 없어 위치 기반 추천을 건너뜀 (회차 정류장 확인)")
-        return pd.DataFrame(columns=["name", "x", "y", "hour", "near_seq", "near_walk_min", "near_wait_min", "near_total_min",
+        return pd.DataFrame(columns=["name", "x", "y", "hour", "slot", "time", "near_seq", "near_walk_min", "near_wait_min", "near_total_min",
                                      "best_seq", "best_walk_min", "best_wait_min", "best_total_min", "saving_min"])
     seqs, end = direction_stops(g, "out")  # 성남으로 가는 사람 -> 성남 방향 정류장만
     g = g.loc[seqs]
-    w = add_expected_wait(scored)
-    w = w[w["has_skt"] & w["hour"].isin(hours) & w["seq"].isin(g.index)]
+    w = _waits(scored, hours, g)
     gx, gy = g["utmk_x"].to_numpy(), g["utmk_y"].to_numpy()
     rows = []
-    for hour, wh in w.groupby("hour"):
+    for key, wh in w.groupby("key"):
+        hour, time = int(wh["hour"].iloc[0]), wh["time"].iloc[0]
         wait = wh.set_index("seq")["wait_total_min"].to_dict()
         to_end = ride_to_end(g, int(hour), sv, ride_tbl, end)
         for p in pts.itertuples():
@@ -216,7 +243,7 @@ def recommend_from_points(scored: pd.DataFrame, g: pd.DataFrame, pts: pd.DataFra
                 continue
             ok = best[0] != near and base[5] - best[5] >= sv["min_saving_min"]
             rows.append({
-                "name": p.name, "x": p.utmk_x, "y": p.utmk_y, "hour": int(hour),
+                "name": p.name, "x": p.utmk_x, "y": p.utmk_y, "hour": hour, "slot": key, "time": time,
                 "near_seq": near, "near_walk_min": base[1], "near_wait_min": base[3], "near_total_min": base[5],
                 "best_seq": best[0] if ok else near, "best_walk_min": best[1] if ok else base[1],
                 "best_wait_min": best[3] if ok else base[3], "best_total_min": best[5] if ok else base[5],
@@ -242,9 +269,11 @@ def wait_burden(scored: pd.DataFrame, rec: pd.DataFrame | None, sv: dict | None 
     out = pd.DataFrame({"excess_wait_person_hours_day": excess})
     out["saving_upper_person_hours_day"] = 0.0
     if rec is not None and not rec.empty:
-        r = rec[rec["saving_min"] > 0].merge(d[["seq", "hour", "latent_daily"]], on=["seq", "hour"])
+        sv_h = rec.groupby(["seq", "hour"])["saving_min"].mean().reset_index()  # 10분 칸이면 시간대 안 평균
+        r = sv_h[sv_h["saving_min"] > 0].merge(d[["seq", "hour", "latent_daily"]], on=["seq", "hour"])
         saved = (r["latent_daily"] * r["saving_min"]).groupby(r["hour"]).sum() / 60
         out["saving_upper_person_hours_day"] = saved.reindex(out.index).fillna(0)
     out["excess_wait_person_hours_year"] = out["excess_wait_person_hours_day"] * sv["workdays_per_year"]
     out.index.name = "hour"
     return out.reset_index()
+

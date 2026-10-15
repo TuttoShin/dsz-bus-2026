@@ -207,10 +207,17 @@ def build_bus_events(card: pd.DataFrame, stops: pd.DataFrame, holidays: list[str
     ev["daytype"], ev["dow"] = day_keys(ev["date"], holidays)
 
     n_days = max(ev["date"].nunique(), 1)
+    trip_max = (ev["load_before"] + ev["boarding"]).groupby(ev["trip_key"]).max()
+    gaps = ev["gap_min"].dropna()
     q.update({
         "하루_운행횟수": round(T / n_days, 1),
         "도착시각_실측비율": float(ev["arr_observed"].mean()),
         "정류장순서_일치도": _order_check(t),
+        # 점검용: 같은 버스가 두 번 잡히면(차량ID 중복) 30초 이내 연속 도착이 비정상적으로 많아짐
+        "30초이내_연속도착_비율": float((gaps <= 0.5).mean()) if len(gaps) else float("nan"),
+        # 점검용: 41명을 자주 넘으면 입석이 있거나 좌석이 더 많은 차량(2층 버스 등)이 섞인 것
+        "운행별_최대재차_95백분위": round(float(trip_max.quantile(0.95)), 1),
+        "재차_41명초과_운행비율": float((trip_max > 41).mean()),
     })
     return ev, q, od_table
 

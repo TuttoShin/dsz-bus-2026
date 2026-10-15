@@ -44,7 +44,7 @@ def merge_all(
     else:
         df = df.merge(share[["seq", "hour", "share_all_stop", "share_all"]], on=["seq", "hour"], how="left")
     if wkdy_profile is None:
-        _print_once("요일별 유동인구 없음 -> 07번 통근 보정 꺼짐")
+        _print_once("요일별 유동인구 없음 -> 07번 체류 목적 보정 꺼짐")
         df["flow_weekday"], df["flow_weekend"] = np.nan, np.nan
     else:
         cols = ["seq"] + [c for c in wkdy_profile.columns if c.startswith("flow_")]
