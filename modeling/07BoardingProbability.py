@@ -94,7 +94,7 @@ STAY_RIDGE = 0.1  # 체류 목적 보정 회귀: 요일·시간 배수가 168개
 QUEUE_STEP_MIN = 1.0  # 줄 서기 계산에서 사람이 오는 시각 간격(분)
 SLOT_MIN = 10  # 서비스용 결과 단위(분). 버스가 4~5분마다 와서 1분 단위는 칸마다 버스가 0~1대라 불안정
 FLOOR_MIN_BUSES = 5  # 교통카드 수요 하한을 쓰려면 필요한 "자리 남기고 떠난 연속 버스" 수
-GRADE_THRESHOLDS = {"여유": 0.9, "보통": 0.7}  # 확률 0.9 이상 여유 / 0.7~0.9 보통 / 0.7 미만 위험
+GRADE_THRESHOLDS = {"여유": 10.0, "보통": 20.0}  # 기대 대기 10분 이하 여유 / 10~20분 보통 / 20분 초과 위험
 FULL_BUS_SHARE_MAX = 0.05  # 거의 만석으로 떠난 버스가 5% 넘으면 "자리가 넉넉"에서 뺌
 DAY_QUANTILES = (0.25, 0.75)  # 날마다 다른 확률의 하위/상위 25% (나쁜 날 / 좋은 날)
 # 사람 한 명 기준 분포 (한 달 동안 그 정류장·시간대에 온 모든 사람): 대기 중앙값·상위 10%, 만석이라 보낸 버스 수
@@ -322,12 +322,13 @@ def estimate_latent_demand(df: pd.DataFrame, model: StayModel, floor: pd.Series 
 
 
 # %%
-def _grade(p: float) -> str:
-    if not np.isfinite(p):
+def _grade(wait: float) -> str:
+    """등급 = 기대 대기 시간(정류장 도착부터 실제로 탄 버스까지, 분) 기준."""
+    if not np.isfinite(wait):
         return "운행없음"
-    if p >= GRADE_THRESHOLDS["여유"]:
+    if wait <= GRADE_THRESHOLDS["여유"]:
         return "여유"
-    if p >= GRADE_THRESHOLDS["보통"]:
+    if wait <= GRADE_THRESHOLDS["보통"]:
         return "보통"
     return "위험"
 
@@ -488,7 +489,7 @@ def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> tuple[pd.Dat
         df["give_up_share"] = np.where(no_bus, np.nan, 0.0)
         for c in PERSON_COLS:
             df[c] = np.nan
-        df["grade"] = df["p_board_mid"].apply(_grade)
+        df["grade"] = df["wait_total_min"].apply(_grade)
         return df, _slot_table([])
     q = pd.concat(rows, ignore_index=True)
     has_w = q["w"] > 1e-9
@@ -530,7 +531,7 @@ def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> tuple[pd.Dat
         dist["missed_buses_p90"][key] = _weighted_quantile(m, w, 0.9)
     for c in PERSON_COLS:
         df[c] = np.where(no_bus, np.nan, pd.Series(dist[c], dtype=float).reindex(cell).to_numpy(float))
-    df["grade"] = df["p_board_mid"].apply(_grade)
+    df["grade"] = df["wait_total_min"].apply(_grade)
     return df, _slot_table(slot_rows)
 
 
@@ -576,4 +577,4 @@ def worst_cells(scored: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
     d = scored[scored["has_skt"]]
     cols = ["stop_label", "seq", "hour", "p_board_low", "p_board_mid", "p_board_high",
             "wait_total_min", "extra_wait_min_mid", "give_up_share", "headway_obs", "gap_cv", "grade"]
-    return d.nsmallest(top_n, "p_board_mid")[cols]
+    return d.nlargest(top_n, "wait_total_min")[cols]

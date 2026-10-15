@@ -146,13 +146,13 @@ def sensitivity(features_by_radius: dict, stay_by_radius: dict, cfg, ref_radius:
                 except ValueError as e:
                     print(f"sensitivity 생략 (r={radius}, tau={tau}, {v}): {e}")
                     continue
-                p = scored[scored["has_skt"]].set_index(["seq", "hour"])["p_board_mid"].dropna()
+                p = scored[scored["has_skt"]].set_index(["seq", "hour"])["wait_total_min"].dropna()  # 위험 = 기대 대기가 긴 칸
                 results[(radius, tau, v)] = (p, scored, diag)
     ref_key = (ref_radius, cfg.tau, cfg.signal)
     if ref_key not in results:
         raise ValueError(f"기준 설정 {ref_key} 결과가 없습니다.")
     ref = results[ref_key][0]
-    ref_top = set(ref.nsmallest(top_n).index)
+    ref_top = set(ref.nlargest(top_n).index)
     rows = []
     for (radius, tau, v), (p, scored, diag) in results.items():
         common = ref.index.intersection(p.index)
@@ -161,9 +161,10 @@ def sensitivity(features_by_radius: dict, stay_by_radius: dict, cfg, ref_radius:
             "radius_m": radius, "tau": tau, "signal_variant": v,
             "is_reference": (radius, tau, v) == ref_key,
             "spearman_vs_ref": float(ref.loc[common].rank().corr(p.loc[common].rank())),
-            f"top{top_n}_overlap_vs_ref": len(ref_top & set(p.nsmallest(top_n).index)) / top_n,
+            f"top{top_n}_overlap_vs_ref": len(ref_top & set(p.nlargest(top_n).index)) / top_n,
             "share_grade_위험": float((skt["grade"] == "위험").mean()),
-            "p_board_mid_mean": float(p.mean()),
+            "wait_total_min_mean": float(p.mean()),
+            "p_board_mid_mean": float(skt["p_board_mid"].mean()),
             "n_train_cells": diag["n_train_cells"],
         })
     return pd.DataFrame(rows).sort_values(["signal_variant", "radius_m", "tau"]).reset_index(drop=True)
@@ -299,15 +300,15 @@ def demand_sensitivity(features: pd.DataFrame, cfg, model, scales=DEMAND_SCALES,
     res = {}
     for s in scales:
         sc, _, _ = m07.run_model(features, replace(cfg, demand_scale=s), model=model)
-        res[s] = sc[sc["has_skt"] & sc["p_board_mid"].notna()].set_index(["seq", "hour"])
+        res[s] = sc[sc["has_skt"] & sc["wait_total_min"].notna()].set_index(["seq", "hour"])
     ref = res[1.0] if 1.0 in res else res[scales[len(scales) // 2]]
-    ref_top = set(ref["p_board_mid"].nsmallest(top_n).index)
+    ref_top = set(ref["wait_total_min"].nlargest(top_n).index)
     return pd.DataFrame([{
         "수요배율": s,
         "위험칸수": int((d["grade"] == "위험").sum()),
         "평균_탑승확률": float(d["p_board_mid"].mean()),
         "평균_기대대기_분": float(d["wait_total_min"].mean()),
-        f"위험top{top_n}_겹침": len(ref_top & set(d["p_board_mid"].nsmallest(top_n).index)) / top_n,
+        f"위험top{top_n}_겹침": len(ref_top & set(d["wait_total_min"].nlargest(top_n).index)) / top_n,
     } for s, d in res.items()])
 
 

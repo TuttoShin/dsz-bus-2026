@@ -76,7 +76,7 @@ def _daytype_tables(scored: pd.DataFrame, daytype: str, suffix: str) -> dict:
     p_pivot = p_pivot.reindex(labels).apply(lambda c: _round_to(c, 0.05))
     g_pivot = src.pivot_table(index="정류장", columns="hour", values="grade", aggfunc="first").reindex(labels)
 
-    worst = scored[scored["has_skt"]].nsmallest(10, "p_board_mid")
+    worst = scored[scored["has_skt"]].nlargest(10, "wait_total_min")  # 위험 = 기대 대기가 긴 칸
     worst_tbl = pd.DataFrame({
         "정류장": worst["seq"].map(label_map).to_numpy(),
         "시간대": worst["hour"].to_numpy(),
@@ -94,9 +94,10 @@ def _daytype_tables(scored: pd.DataFrame, daytype: str, suffix: str) -> dict:
     return {
         f"01{suffix}BoardingProbabilityPivot{daytype.capitalize()}": (
             p_pivot, f"[{kr}] 정류장x시간대 탑승가능확률(교통카드 버스별 실측, 5%p 반올림, 빈칸 = 운행 없음). 서비스 입력값", True),
-        f"02{suffix}GradePivot{daytype.capitalize()}": (g_pivot, f"[{kr}] 정류장x시간대 등급(여유/보통/위험/운행없음)", True),
+        f"02{suffix}GradePivot{daytype.capitalize()}": (
+            g_pivot, f"[{kr}] 정류장x시간대 등급 (기대 대기 10분 이하 여유 / 10~20분 보통 / 20분 초과 위험 / 운행없음)", True),
         f"03{suffix}WorstCellsTop10{daytype.capitalize()}": (
-            worst_tbl, f"[{kr}] 탑승가능확률 최하위 10개 정류장·시간대(날마다 차이, 추가 대기, 실제 배차·몰림)", False),
+            worst_tbl, f"[{kr}] 기대 대기 시간이 가장 긴 10개 정류장·시간대(탑승확률, 날마다 차이, 추가 대기, 실제 배차·몰림)", False),
     }
 
 
@@ -369,19 +370,19 @@ def _deck_tables(r: dict, label_map: dict) -> dict:
         "예상대기_평균_분": _round_to(top["wait_total_min"], 1),
         "예상대기_중앙값_분": _round_to(top["wait_p50_min"], 1),
         "예상대기_상위10%_분": _round_to(top["wait_p90_min"], 1),
-    }), "[장표19] 요일·시간대별 탑승 실패 위험 칸 Top5: 첫 버스 탑승확률, 만석이라 보내는 버스 수, 사람별 대기 시간 분포", False)
+    }), "[장표19] 요일·시간대별 위험 칸 Top5 (기대 대기가 긴 순): 첫 버스 탑승확률, 만석이라 보내는 버스 수, 사람별 대기 시간 분포", False)
 
     out["27DeckNumbers"] = (_deck_numbers(r, label_map), "장표 빈칸(○)에 들어갈 숫자 모음 (모두 위 표·그림과 같은 계산)", False)
     return out
 
 
 def _risk_rank(scored_by_dow: dict, seoul: list) -> pd.DataFrame:
-    """요일·시간대 칸을 위험한 순서로. 확률이 같으면(예: 여러 칸이 0%) 기대 대기가 긴 칸이 먼저.
+    """요일·시간대 칸을 위험한 순서로 = 기대 대기 시간이 긴 순서 (같으면 탑승확률이 낮은 칸이 먼저).
     첫차·막차 시간(6시 전, 시간당 버스 2대 미만)은 버스가 드물어서 뺌"""
     allc = pd.concat([d.assign(dow=k) for k, d in scored_by_dow.items()], ignore_index=True)
     allc = allc[allc["has_skt"] & allc["seq"].isin(seoul) & allc["p_board_mid"].notna()
                 & allc["hour"].between(6, 23) & (allc["n_buses"] >= 2)]
-    return allc.sort_values(["p_board_mid", "wait_total_min"], ascending=[True, False])
+    return allc.sort_values(["wait_total_min", "p_board_mid"], ascending=[False, True])
 
 
 def _deck_numbers(r: dict, label_map: dict) -> pd.DataFrame:
@@ -499,19 +500,25 @@ def _deck_numbers(r: dict, label_map: dict) -> pd.DataFrame:
     if out_seqs:
         add(19, f"평일 18시 탑승확률: 성남 방향 첫 정류장 {label_map.get(out_seqs[0])} -> {fl}",
             f"{pct(p18.get(out_seqs[0], np.nan))} -> {pct(p18.get(focus, np.nan))}")
-    add(19, "토요일 탑승확률이 가장 낮은 시간", f"{deck['sat_worst']}시")
-    fh = {k: d[(d["seq"] == focus) & d["hour"].between(6, 23)].set_index("hour")["p_board_mid"] for k, d in sdow.items()}
+    w18 = sc[(sc["hour"] == 18)].set_index("seq")["wait_total_min"]
+    if out_seqs:
+        add(19, f"평일 18시 기대 대기: 성남 방향 첫 정류장 {label_map.get(out_seqs[0])} -> {fl}",
+            f"{w18.get(out_seqs[0], np.nan):.0f}분 -> {w18.get(focus, np.nan):.0f}분")
+    add(19, "토요일 기대 대기가 가장 긴 시간", f"{deck['sat_worst']}시")
+    fh = {k: d[(d["seq"] == focus) & d["hour"].between(6, 23)].set_index("hour")["wait_total_min"] for k, d in sdow.items()}
     tw = pd.concat([fh[k] for k in ("tue", "wed", "thu")], axis=1).mean(axis=1).dropna()
     if len(tw):
-        add(19, f"{fl} 화~목 최저 탑승확률", f"{pct(tw.min())} ({int(tw.idxmin())}시)")
-        add(19, f"{fl} 금요일 같은 시간", pct(fh["fri"].get(int(tw.idxmin()), np.nan)))
-    wke = pd.concat([fh["sat"], fh["sun"]], axis=1).min(axis=1).dropna()
+        h = int(tw.idxmax())
+        add(19, f"{fl} 화~목 최장 기대 대기", f"{tw.max():.0f}분 ({h}시)")
+        add(19, f"{fl} 금요일 같은 시간 기대 대기", f"{fh['fri'].get(h, np.nan):.0f}분")
+    wke = pd.concat([fh["sat"], fh["sun"]], axis=1).max(axis=1).dropna()
     if len(wke):
-        add(19, f"{fl} 주말 최저 탑승확률", f"{pct(wke.min())} ({int(wke.idxmin())}시)")
+        add(19, f"{fl} 주말 최장 기대 대기", f"{wke.max():.0f}분 ({int(wke.idxmax())}시)")
     allc = _risk_rank(sdow, seoul)
     if len(allc):
         w = allc.iloc[0]
-        add(19, "가장 위험한 칸", f"{label_map.get(int(w['seq']))} {DOW_KR[w['dow']]} {int(w['hour'])}시, 확률 {pct(w['p_board_mid'])}")
+        add(19, "가장 위험한 칸 (기대 대기가 가장 긴 칸)",
+            f"{label_map.get(int(w['seq']))} {DOW_KR[w['dow']]} {int(w['hour'])}시, 기대 대기 {w['wait_total_min']:.0f}분, 확률 {pct(w['p_board_mid'])}")
         add(19, "그 칸 최악(상위 10%): 보내는 버스 / 대기", f"{w['missed_buses_p90']:.0f}대 / {w['wait_p90_min']:.0f}분")
     return pd.DataFrame(rows, columns=["장표", "항목", "값"]).astype(str)
 

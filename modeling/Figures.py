@@ -39,7 +39,8 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#62
 BLUE_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 ORANGE_RAMP = ["#fde6db", "#f8c1a8", "#f39a74", "#eb6834", "#c44f20", "#943a16", "#62260e"]
 PROB_DIVERGING = ["#a8282a", "#e34948", "#f3a8a4", NEUTRAL, "#9ec5f4", "#3987e5", "#184f95"]
-PROB_CENTER = 0.8  # 보통(0.7~0.9)의 가운데. 이보다 낮으면 빨강 쪽
+PROB_CENTER = 0.8  # 확률 색의 가운데. 이보다 낮으면 빨강 쪽 (등급은 기대 대기 시간 기준, WAIT_CENTER)
+WAIT_CENTER = 15.0  # 기대 대기 색의 가운데 = 보통(10~20분)의 가운데. 이보다 길면 빨강 쪽
 
 DOW_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DOW_KR = {"mon": "월", "tue": "화", "wed": "수", "thu": "목", "fri": "금", "sat": "토", "sun": "일·공휴일"}
@@ -268,11 +269,11 @@ def f0_summary(r: dict, save) -> None:
     sc, we = r["model_scored"], r["model_scored_weekend"]
     s = sc[sc["has_skt"]]
     names = _stop_names(sc)
-    worst = s.nsmallest(1, "p_board_mid").iloc[0]
+    worst = s.nlargest(1, "wait_total_min").iloc[0]
     burden = r["wait_burden"]
     tiles = [
-        ("평일 위험 칸", f"{int((s['grade'] == '위험').sum())}칸", f"서울 도심 {s['seq'].nunique()}개 정류장 x 운행 시간대 중 탑승확률 0.7 미만"),
-        ("가장 위험한 곳", f"{worst['p_board_mid']:.2f}", f"{names[worst['seq']]} {int(worst['hour'])}시 평일 탑승가능확률"),
+        ("평일 위험 칸", f"{int((s['grade'] == '위험').sum())}칸", f"서울 도심 {s['seq'].nunique()}개 정류장 x 운행 시간대 중 기대 대기 20분 초과"),
+        ("가장 위험한 곳", f"{worst['wait_total_min']:.0f}분", f"{names[worst['seq']]} {int(worst['hour'])}시 평일 기대 대기 시간"),
         ("주말 위험 칸", f"{int((we[we['has_skt']]['grade'] == '위험').sum())}칸", "같은 기준, 주말·공휴일"),
         ("평일 하루 초과 대기", f"{burden['excess_wait_person_hours_day'].sum():,.0f}인·시간", "만차로 버스를 보내며 더 기다린 시간 합계"),
         ("연간 환산", f"{burden['excess_wait_person_hours_year'].sum() / 1000:,.0f}천 인·시간", f"평일 {r['service_cfg'].get('workdays_per_year', 250)}일 기준"),
@@ -314,15 +315,15 @@ def f1_heatmap_by_dow(by_dow: dict, save) -> None:
     fig.subplots_adjust(hspace=0.35, wspace=0.06)
     cb = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.7, label="탑승가능확률")
     cb.set_ticks([0, 0.5, 0.7, 0.8, 0.9, 1.0])
-    fig.suptitle(f"요일별 정류장 x 시간대 탑승가능확률 (운행 {hours[0]}시~{hours[-1]}시, 빨강 = 위험, 초록 = 여유, 빈칸 = 운행 없음)",
+    fig.suptitle(f"요일별 정류장 x 시간대 탑승가능확률 (운행 {hours[0]}시~{hours[-1]}시, 빨강 = 낮음, 초록 = 높음, 빈칸 = 운행 없음)",
                  fontsize=13, color=INK)
-    save(fig, "F1BoardingProbabilityHeatmap", "요일별 정류장 x 운행 시간 전체 탑승가능확률 히트맵(빨강 위험 ~ 초록 여유)")
+    save(fig, "F1BoardingProbabilityHeatmap", "요일별 정류장 x 운행 시간 전체 탑승가능확률 히트맵(빨강 낮음 ~ 초록 높음)")
 
 
 def f2_profile_worst_hour(sc: pd.DataFrame, by_dow: dict, save) -> int:
     import matplotlib.pyplot as plt
     s = sc[sc["has_skt"] & sc["hour"].isin(COMMUTE_HOURS)]
-    worst_hour = int(s.groupby("hour")["p_board_mid"].mean().idxmin())
+    worst_hour = int(s.groupby("hour")["wait_total_min"].mean().idxmax())  # 기대 대기가 가장 긴 시간
     names = _stop_names(sc)
     fig, ax = plt.subplots(figsize=(11, 4.6))
     d = s[s["hour"] == worst_hour].sort_values("seq")
@@ -333,8 +334,6 @@ def f2_profile_worst_hour(sc: pd.DataFrame, by_dow: dict, save) -> int:
         w = by_dow[k]
         w = w[w["has_skt"] & (w["hour"] == worst_hour)].set_index("seq").reindex(d["seq"])
         ax.plot(x, w["p_board_mid"], marker="o", color=DOW_COLOR[k], label=DOW_KR[k], lw=1.6)
-    ax.axhline(0.7, color=AXIS, lw=0.8)
-    ax.text(len(x) - 0.5, 0.71, "위험 기준 0.7", fontsize=7.5, color=MUTED, ha="right")
     ax.set_xticks(x, [names[q] for q in d["seq"]], rotation=30, ha="right")
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("탑승가능확률")
@@ -354,7 +353,6 @@ def f8_hourly_by_dow(by_dow: dict, save) -> None:
             s = by_dow[k]
             g = s[s["has_skt"]].groupby("hour")["p_board_mid"].agg(stat).reindex(hours)
             ax.plot(range(len(hours)), g, color=DOW_COLOR[k], label=DOW_KR[k], lw=1.6, marker="o", ms=3)
-        ax.axhline(0.7, color=AXIS, lw=0.8)
         _hour_ticks(ax, hours)
         ax.set_xlabel("시간대")
         ax.set_title(title)
@@ -397,7 +395,7 @@ def f9_stop_dow_hour(by_dow: dict, save) -> None:
 def f10_day_variation(sc: pd.DataFrame, save, top_n: int = 15) -> None:
     """위험한 칸의 날마다 차이: 나쁜 날(하위 25%) ~ 좋은 날(상위 25%)."""
     import matplotlib.pyplot as plt
-    s = sc[sc["has_skt"]].nsmallest(top_n, "p_board_mid").iloc[::-1]
+    s = sc[sc["has_skt"]].nlargest(top_n, "wait_total_min").iloc[::-1]  # 위험 = 기대 대기가 긴 칸
     names = _stop_names(sc)
     fig, ax = plt.subplots(figsize=(9, 0.38 * len(s) + 1.2))
     y = np.arange(len(s))
@@ -419,8 +417,8 @@ def f11_bunching_by_stop(sc: pd.DataFrame, uniform: pd.DataFrame, save) -> None:
     import matplotlib.pyplot as plt
     s = sc[sc["has_skt"]]
     names = _stop_names(sc)
-    am = int(s[s["hour"].isin(range(6, 10))].groupby("hour")["p_board_mid"].mean().idxmin())
-    pm = int(s[s["hour"].isin(range(16, 24))].groupby("hour")["p_board_mid"].mean().idxmin())
+    am = int(s[s["hour"].isin(range(6, 10))].groupby("hour")["wait_total_min"].mean().idxmax())
+    pm = int(s[s["hour"].isin(range(16, 24))].groupby("hour")["wait_total_min"].mean().idxmax())
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), sharey=True)
     for ax, h in zip(axes, (am, pm)):
         a = s[s["hour"] == h].set_index("seq")["p_board_mid"]
@@ -1114,7 +1112,7 @@ def s18_validation(r: dict, save) -> None:
     fig.suptitle("모델 신뢰성 검증 (평일)", fontsize=12, y=1.04)
     _deck_note(fig, "① WAPE = |예측 수요 - 실제 승차| 합 ÷ 실제 승차 합, 자리 넉넉 칸(실제 승차 = 수요)에서. "
                "② 만석 칸 = 그 칸 버스의 30% 이상이 만석으로 떠남. ③ 같은 모델, 줄 서기에 넣는 수요만 ±20%. "
-               "위험 = 첫 버스 탑승확률 0.7 미만")
+               "위험 = 기대 대기 20분 초과")
     save(fig, "S18Validation", "[장표18] 모델 신뢰성 검증: ① 재현 오차 ② 시간 분할(1~3주 -> 4주차) ③ 수요 ±20% ④ SKT 기여")
 
 
@@ -1172,8 +1170,6 @@ def s19_results(r: dict, save) -> None:
             p = v["p_board_mid"].iloc[i]
             if np.isfinite(p):
                 a1.annotate(f"{p:.0%}", (i, p), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=8, color=col)
-    a1.axhline(0.7, color=PROB_DIVERGING[1], lw=0.8, ls=":")
-    a1.text(len(seqs) - 0.5, 0.7, "위험 0.7", color=PROB_DIVERGING[1], fontsize=7.5, ha="right", va="bottom")
     a1.set_ylim(0, 1.08)
     a1.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     a1.set_ylabel("첫 버스 탑승확률")
@@ -1181,6 +1177,9 @@ def s19_results(r: dict, save) -> None:
     a1.set_title("정류장 순서별 탑승확률·예상 대기 시간", pad=18)
     a2.set_ylabel("예상 대기 시간 (분)")
     a2.set_ylim(bottom=0)
+    for v, lab, col in ((10, "여유 10분", PROB_DIVERGING[5]), (20, "위험 20분", PROB_DIVERGING[1])):
+        a2.axhline(v, color=col, lw=0.8, ls=":")
+        a2.text(-0.4, v, lab, color=col, fontsize=7.5, ha="left", va="bottom")
     a2.legend(loc="upper left", ncol=2, fontsize=7.5)
     _seoul_axis(a2, r, seqs, names)
     _deck_note(fig, "띠 = 날마다 다른 확률의 하위~상위 25%. 대기 = 정류장 도착부터 실제 탄 버스까지 (줄 서기 계산, 만석 버스를 보낸 시간 포함)")
@@ -1188,23 +1187,27 @@ def s19_results(r: dict, save) -> None:
 
     focus = deck["focus"]
     hours = _service_hours([r["scored_by_dow"][k] for k in DOW_ORDER])
-    piv = pd.DataFrame({DOW_KR[k]: r["scored_by_dow"][k][r["scored_by_dow"][k]["seq"] == focus].set_index("hour")["p_board_mid"].reindex(hours)
+    piv = pd.DataFrame({DOW_KR[k]: r["scored_by_dow"][k][r["scored_by_dow"][k]["seq"] == focus].set_index("hour")["wait_total_min"].reindex(hours)
                         for k in DOW_ORDER}).T
+    vals = piv.to_numpy(float)
+    from matplotlib.colors import TwoSlopeNorm
+    vmax = max(2 * WAIT_CENTER, float(np.nanpercentile(vals, 95)) if np.isfinite(vals).any() else 0)
     fig, ax = plt.subplots(figsize=(max(8, 0.45 * len(hours) + 2.5), 3.8))
-    im = _prob_heatmap(ax, piv, _cmap(PROB_DIVERGING, "prob"), _prob_norm())
+    im = _prob_heatmap(ax, piv, _cmap(PROB_DIVERGING[::-1], "wait"), TwoSlopeNorm(vmin=0, vcenter=WAIT_CENTER, vmax=vmax))
     for i in range(piv.shape[0]):
         for j in range(piv.shape[1]):
             v = piv.iat[i, j]
             if np.isfinite(v):
-                ax.text(j, i, f"{v * 100:.0f}", ha="center", va="center", fontsize=7, color="white" if v < 0.5 else INK)
+                ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=7, color="white" if v > 0.8 * vmax else INK)
     _hour_ticks(ax, hours)
     ax.set_yticks(range(7), list(piv.index))
     ax.set_xlabel("시간대")
-    cb = fig.colorbar(im, ax=ax, shrink=0.85, label="첫 버스 탑승확률")
-    cb.set_ticks([0, 0.5, 0.7, 0.8, 0.9, 1.0])
-    ax.set_title(f"{names.get(focus, focus)} 요일 x 시간대 탑승확률 (%)")
-    _deck_note(fig, "빨강 = 위험(0.7 미만), 파랑 = 여유(0.9 이상), 빈칸 = 운행 없음")
-    save(fig, "S19bFocusStopDowHour", "[장표19 ②] 말단 정류장 요일 x 시간대 첫 버스 탑승확률")
+    cb = fig.colorbar(im, ax=ax, shrink=0.85, label="기대 대기 시간 (분)")
+    cb.set_ticks([0, 10, 20] + ([round(vmax)] if vmax > 25 else []))
+    ax.set_title(f"{names.get(focus, focus)} 요일 x 시간대 기대 대기 시간 (분)")
+    _deck_note(fig, "기대 대기 = 정류장 도착부터 실제로 탄 버스까지 (만석 버스를 보낸 시간 포함). "
+                    "파랑 = 여유(10분 이하), 회색 = 보통(10~20분), 빨강 = 위험(20분 초과), 빈칸 = 운행 없음")
+    save(fig, "S19bFocusStopDowHour", "[장표19 ②] 말단 정류장 요일 x 시간대 기대 대기 시간 (등급: 10분 이하 여유 / 20분 초과 위험)")
 
 
 def build_deck(r: dict, save) -> None:

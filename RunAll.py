@@ -346,7 +346,7 @@ def deck_context(geom: pd.DataFrame, deck_stops: dict, bus_prof: pd.DataFrame, s
     focus      : 말단 정류장 (없으면 성남 방향 마지막 정류장). 13·16·17·19쪽 대표
     weekday_pm : 평일 16~20시 중 말단 정류장 도착 시 남은 좌석이 가장 적은 시간
     weekend_pm : 주말 12~20시 중 말단 정류장 남은 좌석이 가장 적은 시간
-    sat_worst  : 토요일 서울 정류장 평균 탑승확률이 가장 낮은 시간 (19쪽)
+    sat_worst  : 토요일 서울 정류장 평균 기대 대기 시간이 가장 긴 시간 (19쪽)
     """
     found = {}
     for kind, name in deck_stops.items():
@@ -363,8 +363,8 @@ def deck_context(geom: pd.DataFrame, deck_stops: dict, bus_prof: pd.DataFrame, s
     sat = scored_dow.get("sat")
     sat_worst = 14
     if sat is not None:
-        m = sat[sat["has_skt"] & sat["hour"].between(6, 23)].groupby("hour")["p_board_mid"].mean().dropna()
-        sat_worst = int(m.idxmin()) if len(m) else 14
+        m = sat[sat["has_skt"] & sat["hour"].between(6, 23)].groupby("hour")["wait_total_min"].mean().dropna()
+        sat_worst = int(m.idxmax()) if len(m) else 14
     return {"stops": found, "focus": focus, "weekday_pm": _min_hour("weekday", list(range(16, 21))),
             "weekend_pm": _min_hour("weekend", list(range(12, 21))), "sat_worst": sat_worst}
 
