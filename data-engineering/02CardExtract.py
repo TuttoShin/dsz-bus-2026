@@ -16,12 +16,21 @@
 
 컬럼 (정의서): OPRAT_DATE, TCBO_ID, TCBO_CAR_ID, TRFFC_WAY_CD, TCBO_ROUTE_ID, GIN_DT, TCBO_GIN_STTN_ID,
                GFF_DT, TCBO_GFF_STTN_ID, USER_CNT
+
+저장해 두고 다시 쓰기 (extract_cached)
+   교통카드 전체를 훑는 데 1시간 넘게 걸려서, 결과를 data/processed/cardCache/ 에 저장한다.
+   다음 실행 때 입력(카드 파일 목록·크기·수정시각, 기준 달, 9401 노선ID 후보, 정류장ID, 통합 ID)이 같으면
+   저장한 것을 읽기만 한다 (몇 초). 하나라도 바뀌면 자동으로 다시 훑는다.
+   강제로 다시 훑으려면 RunAll.py --recard
+   cardCache/ 는 행 단위 자료라 반출 X
 """
 
 from __future__ import annotations
 
 import glob
+import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -173,6 +182,69 @@ def extract(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_i
             "stop_board": stop_board, "stop_routes": stop_routes, "pair_trips": pair_trips, "n_rows": n_rows,
             "alias_board_share": alias_users / stop_users if stop_users else 0.0,  # 9401 정류장 승차 중 통합 ID로 들어온 비율
             "days": f"{days[0]} ~ {days[-1]}" if days else ""}
+
+
+# %%
+CACHE_TABLES = ["card", "stop_board", "pair_trips", "stop_routes"]  # parquet으로 저장하는 표
+CACHE_VALUES = ["route_id", "route_ids_merged", "route_counts", "n_rows", "alias_board_share", "days"]  # meta.json
+
+
+def cache_key(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_ids: set[str] | None,
+              card_ym: str | None, aliases: dict | None) -> str:
+    """입력이 같은지 확인하는 지문. 카드 파일은 내용 대신 이름·크기·수정시각으로 (수십 GB를 다시 읽지 않게)."""
+    files = [[str(p), p.stat().st_size, int(p.stat().st_mtime)] for p in paths]
+    blob = json.dumps({
+        "files": files, "card_ym": card_ym, "route_ids": sorted(map(str, route_ids)),
+        "stop_ids": sorted(stop_ids), "seoul_ids": sorted(seoul_ids or []),
+        "aliases": sorted((aliases or {}).items()), "version": 1,
+    }, ensure_ascii=False)
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()
+
+
+def _save_cache(ext: dict, cache_dir: Path, key: str) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for name in CACHE_TABLES:
+        v = ext.get(name)
+        if isinstance(v, pd.Series):
+            v = v.rename("n").rename_axis("stop").reset_index()
+        if v is None or len(v) == 0:
+            continue
+        v.to_parquet(cache_dir / f"{name}.parquet", index=False)
+        saved.append(name)
+    meta = {"key": key, "tables": saved, **{k: ext[k] for k in CACHE_VALUES}}
+    # meta.json을 마지막에 써야 중간에 멈췄을 때 반쪽짜리 저장본을 쓰지 않음
+    (cache_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _load_cache(cache_dir: Path, meta: dict) -> dict:
+    ext = {k: meta[k] for k in CACHE_VALUES}
+    for name in CACHE_TABLES:
+        path = cache_dir / f"{name}.parquet"
+        df = pd.read_parquet(path) if name in meta["tables"] else pd.DataFrame()
+        if name == "stop_routes":
+            df = df.set_index("stop")["n"] if len(df) else pd.Series(dtype=float)
+        ext[name] = df
+    return ext
+
+
+def extract_cached(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_ids: set[str] | None,
+                   card_ym: str | None, aliases: dict | None, cache_dir: Path, refresh: bool = False) -> dict:
+    """extract()와 같은 결과. 입력이 지난번과 같으면 저장해 둔 것을 읽고, 아니면 다시 훑고 저장한다."""
+    key = cache_key(paths, route_ids, stop_ids, seoul_ids, card_ym, aliases)
+    meta_path = cache_dir / "meta.json"
+    if meta_path.exists() and not refresh:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("key") == key and all((cache_dir / f"{t}.parquet").exists() for t in meta.get("tables", [])):
+            print(f"02 저장본 사용 ({cache_dir.name}/, 교통카드를 다시 훑지 않음. 다시 훑으려면 --recard)")
+            return _load_cache(cache_dir, meta)
+        print("02 저장본과 입력이 달라서(카드 파일·기준 달·노선·정류장 변경) 교통카드를 다시 훑음")
+    elif refresh:
+        print("--recard: 교통카드를 다시 훑음")
+    ext = extract(paths, route_ids, stop_ids, seoul_ids, card_ym, aliases)
+    _save_cache(ext, cache_dir, key)
+    print(f"02 결과 저장 -> {cache_dir} (다음 실행부터 재사용)")
+    return ext
 
 
 def describe(card: pd.DataFrame) -> dict:

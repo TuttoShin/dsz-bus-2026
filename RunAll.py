@@ -116,6 +116,8 @@ def step(title: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="안심구역 일괄 실행")
     parser.add_argument("--dummy", action="store_true", help="가짜 데이터로 리허설 (MakeDummyRaw.py가 만듦)")
+    parser.add_argument("--recard", action="store_true",
+                        help="저장해 둔 02 교통카드 추출 결과를 쓰지 않고 다시 훑음 (보통은 입력이 바뀌면 자동으로 다시 훑음)")
     parser.add_argument("--patience", type=float, default=None,
                         help="줄 서기 이탈: 이 분(예: 120)을 기다려도 못 타면 줄에서 빠짐. 안 쓰면 이탈 없음")
     args = parser.parse_args()
@@ -130,13 +132,13 @@ def main() -> None:
     log = open(PROCESSED_DIR / f"run_log{suffix}.txt", "w", encoding="utf-8")
     sys.stdout = _Tee(sys.__stdout__, log)
     try:
-        run(cfg_d, dummy=args.dummy)
+        run(cfg_d, dummy=args.dummy, recard=args.recard)
     finally:
         sys.stdout = sys.__stdout__
         log.close()
 
 
-def run(c: dict, dummy: bool = False) -> None:
+def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     m01 = load_module("data-engineering/01RouteStops.py")
     m02 = load_module("data-engineering/02CardExtract.py")
     m03 = load_module("data-engineering/03BusEvents.py")
@@ -162,11 +164,14 @@ def run(c: dict, dummy: bool = False) -> None:
     stop_all = m01.add_direction(stop_all, c["turnaround_name"])
     m01.summary(stop_all)
 
-    step("02. 교통카드: 9401 기록 + 9401 정류장 전체 노선 승차 (전체를 한 번 훑음, 오래 걸림)")
+    step("02. 교통카드: 9401 기록 + 9401 정류장 전체 노선 승차 (처음 한 번만 전체를 훑음, 오래 걸림)")
     seoul_ids = set(stop_all.loc[stop_all["segment"] == "서울_도심루프", "sttn_id"])
     aliases = m01.stop_aliases(RAW_DIR / c["stop_file"], stop_all, c["stop_merge_m"])
     print(f"다른 정산사업자 정류장ID 통합 (이름 같고 {c['stop_merge_m']:.0f}m 안): {len(aliases)}개")
-    ext = m02.extract(m02.card_files(c["card_file"]), route_ids, set(stop_all["sttn_id"]), seoul_ids, c["card_ym"], aliases)
+    # 한 번 훑은 결과는 data/processed/cardCache/ 에 저장해 두고, 입력이 같으면 다음 실행부터 읽기만 함
+    cache_dir = PROCESSED_DIR / ("cardCacheDummy" if dummy else "cardCache")
+    ext = m02.extract_cached(m02.card_files(c["card_file"]), route_ids, set(stop_all["sttn_id"]), seoul_ids, c["card_ym"],
+                             aliases, cache_dir, refresh=recard)
     route_id = ext["route_id"]
     stops = stop_all[stop_all["route_id"].str.lstrip("0") == route_id].reset_index(drop=True)
     stops.to_parquet(PROCESSED_DIR / "stopMaster.parquet", index=False)
