@@ -1,28 +1,31 @@
 """
 08Validate.py
 
-09번 결과를 믿을 수 있는지 검증한다.
-"못 탄 사람"은 데이터에 없어서 정답과 비교할 수가 없다. 대신 아래 4가지를 확인한다.
+07번 결과를 믿을 수 있는지 검증한다.
+"못 탄 사람"은 데이터에 없어서 정답과 비교할 수가 없다. 대신 아래를 확인한다.
 결과는 전부 요약표라 반출 가능 (10번이 export/ 폴더로 옮김).
 
 1. cv_ablation: SKT 데이터를 넣으면 예측이 더 정확해지는가
-   - 자리가 넉넉했던 칸(실제 승차 = 수요)을 5등분해서, 4개로 학습하고 1개로 맞춰보기를 5번 반복
-   - 비교: no_skt / flow / flow_x_share_hourly / flow_x_share / flow_x_share + 통근 보정
-     (flow와 flow_x_share는 정류장 고정 분담률이라 결과가 같게 나오는 게 정상)
+   - 자리가 넉넉했던 칸(실제 승차 = 수요)으로 학습하고 맞춰보기
+       무작위 5-fold   : 칸을 무작위로 5등분. 이미 본 정류장의 다른 시간대를 맞히는 시험
+       정류장 제외(LOSO): 정류장 하나를 통째로 빼고 맞히는 시험 (노선을 넓힐 때 쓸 수 있는가)
    - no_skt보다 오차가 작으면 = SKT 데이터가 도움이 된다
-   - 통근 보정을 넣어서 오차가 더 작아지면 = 직장인 비중 반영이 도움이 된다 (PPT 17쪽 근거)
+   - 통근 보정을 넣어서 출퇴근 시간 오차가 작아지면 = 직장인 비중 반영이 도움이 된다
 
 2. saturation_curve: 버스가 찰수록 승차가 줄어드는가
-   - 상대 승차율 = (승차 인원 / 주변 유동인구) / 그 정류장의 평소 값
-   - 버스가 꽉 찰수록 이 값이 1보다 떨어지면 = 자리가 없어서 못 탔다는 증거
+   - 실제 승차 / 모델 예측 수요를 버스 도착 시 재차율 구간별로
+   - 버스가 꽉 찰수록 1보다 떨어지면 = 자리가 없어서 못 탔다는 증거
 
 3. sensitivity: 설정을 바꿔도 결과가 비슷한가
-   - 반경(100/150/200m) x tau(0.5/0.6/0.7) x 수요신호 종류를 모두 돌려봄
-   - 기본 설정과의 순위 상관(Spearman, 1에 가까울수록 같음), 위험 top10이 얼마나 겹치는지
+   - 반경(100/150/200m) x tau(0.5/0.6/0.7) x 수요신호 종류
+   - 기본 설정과의 순위 상관(Spearman), 위험 top10이 얼마나 겹치는지
 
-4. rule_vs_model: 07번(가중합 점수)과 09번(확률)이 위험 순위를 비슷하게 매기는가
+4. bunching_effect: 버스 몰림을 무시하면 결과가 얼마나 달라지는가
+   - 실측(버스별 실제 공백·재차) vs 모든 버스가 평균 간격·평균 재차로 고르게 왔다고 칠 때
 
-CLI: python modeling/08Validate.py  (반경 비교는 빠짐. 전체는 RunAll.py에서)
+5. measured_headway: 교통카드로 잰 정류장별 실제 배차 공백과 몰림 정도 (출근 / 퇴근)
+
+CLI 없음 (RunAll.py에서 호출)
 """
 
 from __future__ import annotations
@@ -37,21 +40,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from Loader import load_module  # noqa: E402
 
-m09 = load_module("modeling/09BoardingProbability.py")
+m07 = load_module("modeling/07BoardingProbability.py")
 
-PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
-# 재차율(재차/좌석) 구간. 0.6 이상은 칸이 몇 개 안 돼서(1~4칸) 하나로 합침
+# 재차율(재차/좌석) 구간. 0.6 이상은 칸이 몇 개 안 돼서 하나로 합침
 SATURATION_BINS = [0, 0.2, 0.4, 0.6, np.inf]
-COMMUTE_PEAK_HOURS = [7, 8, 9, 17, 18, 19]  # 통근 보정이 작동하는 시간 (09번 오전첨두·오후첨두)
-
-
-# %%
-def _poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
-    """포아송 모델용 오차 지표 (0에 가까울수록 잘 맞음)."""
-    mu = np.maximum(mu, 1e-9)
-    term = np.where(y > 0, y * np.log(np.where(y > 0, y, 1) / mu), 0.0)
-    return float(2 * np.mean(term - (y - mu)))
-
+COMMUTE_PEAK_HOURS = [7, 8, 9, 17, 18, 19]  # 통근 보정이 작동하는 시간 (07번 오전첨두·오후첨두)
 
 CV_VARIANTS = [  # (표에 쓸 이름, 수요신호, 통근 보정)
     ("no_skt", "no_skt", False),
@@ -62,35 +55,35 @@ CV_VARIANTS = [  # (표에 쓸 이름, 수요신호, 통근 보정)
 ]
 
 
+def _poisson_deviance(y: np.ndarray, mu: np.ndarray) -> float:
+    mu = np.maximum(mu, 1e-9)
+    term = np.where(y > 0, y * np.log(np.where(y > 0, y, 1) / mu), 0.0)
+    return float(2 * np.mean(term - (y - mu)))
+
+
+# %%
 def cv_ablation(features: pd.DataFrame, cfg, k: int = 5, seed: int = 42) -> pd.DataFrame:
-    """두 가지 방식으로 나눠 검증한다. 모든 수요신호가 같은 칸, 같은 나눔을 쓴다.
+    """두 가지 나눔(무작위 5-fold / 정류장 제외)으로 수요신호별 예측 오차 비교. 모든 신호가 같은 칸·같은 나눔.
 
-    무작위 5-fold   : 칸을 무작위로 5등분. 이미 본 정류장의 다른 시간대를 맞히는 시험
-    정류장 제외(LOSO): 정류장 하나를 통째로 빼고 학습해서 그 정류장을 맞히는 시험
-                       처음 보는 정류장(노선 확장)에 쓸 수 있는가 -> SKT 유동인구가 필요한지 보는 시험
-                       (처음 보는 정류장은 정류장 계수가 없어서 정류장 효과 평균을 씀)
-
-    지표: MAE(평균 오차, 명), RMSE, 포아송 오차, R2(log 기준, 1에 가까울수록 좋음)
     mae_improvement_vs_no_skt = 1 - (MAE / 같은 방식 no_skt의 MAE)   (0.2면 SKT 없을 때보다 오차 20% 감소)
-    mae_peak_hours: 출퇴근 첨두(7~9시, 17~19시) 칸만의 MAE. 통근 보정은 이 시간에만 작동하므로 효과는 여기서 봐야 함
+    mae_peak_hours: 출퇴근 첨두(7~9시, 17~19시) 칸만의 MAE. 통근 보정 효과는 여기서 봐야 함
     """
-    base = m09.add_capacity_terms(m09.add_demand_signal(features, "no_skt", cfg.daytype), cfg)
+    base = m07.add_capacity_terms(m07.add_demand_signal(features, "no_skt", cfg.daytype), cfg)
     pool_idx = base.index[base["unconstrained"] & base["has_skt"]]
     rng = np.random.default_rng(seed)
     splits = {
         "무작위 5-fold": rng.integers(0, k, size=len(pool_idx)),
         "정류장 제외(LOSO)": base.loc[pool_idx, "seq"].to_numpy(),
     }
-    out = pd.concat([_cv_once(features, cfg, pool_idx, folds).assign(cv_type=name) for name, folds in splits.items()],
-                    ignore_index=True)
-    return out
+    return pd.concat([_cv_once(features, cfg, pool_idx, folds).assign(cv_type=name) for name, folds in splits.items()],
+                     ignore_index=True)
 
 
 def _cv_once(features: pd.DataFrame, cfg, pool_idx, folds: np.ndarray) -> pd.DataFrame:
     rows = []
     for label, v, commute in CV_VARIANTS:
         try:
-            df = m09.add_capacity_terms(m09.add_demand_signal(features, v, cfg.daytype), cfg).loc[pool_idx]
+            df = m07.add_capacity_terms(m07.add_demand_signal(features, v, cfg.daytype), cfg).loc[pool_idx]
         except ValueError as e:
             print(f"{v} 생략: {e}")
             continue
@@ -99,12 +92,11 @@ def _cv_once(features: pd.DataFrame, cfg, pool_idx, folds: np.ndarray) -> pd.Dat
             train, test = df[folds != f], df[folds == f]
             if test.empty or train.empty:
                 continue
-            model = m09.fit_demand_model(train, v, commute)
+            model = m07.fit_demand_model(train, v, commute)
             pred_all.append(model.predict(test))
             y_all.append(test["daily_boarding"].to_numpy(float))
             hour_all.append(test["hour"].to_numpy())
         y, pred = np.concatenate(y_all), np.concatenate(pred_all)
-        # 통근 보정이 작동하는 출퇴근 첨두(7~9시, 17~19시) 칸만의 오차
         peak = np.isin(np.concatenate(hour_all), COMMUTE_PEAK_HOURS)
         ss_res = np.sum((np.log1p(y) - np.log1p(pred)) ** 2)
         ss_tot = np.sum((np.log1p(y) - np.log1p(y).mean()) ** 2)
@@ -129,20 +121,15 @@ def _cv_once(features: pd.DataFrame, cfg, pool_idx, folds: np.ndarray) -> pd.Dat
 
 # %%
 def saturation_curve(scored: pd.DataFrame) -> pd.DataFrame:
-    """버스 도착 시 재차율 구간별 상대 승차율.
+    """버스 도착 시 재차율 구간별 상대 승차율 = 실제 승차 / 모델 예측 수요.
 
-    상대 승차율 = 실제 승차 / 09번 모델이 예측한 수요(자리가 충분했다면 탔을 인원)
-      1에 가까움   = 예측한 만큼 다 탔다
-      1보다 작음   = 자리가 없어서 덜 탔다 (수요가 좌석 수에서 잘림)
-    모델 예측에 정류장·시간대 차이가 이미 들어 있어서, "출퇴근 시간이라 원래 많이 탄다"는 효과가 빠진다.
-    (승차/유동인구를 그대로 쓰면 붐비는 시간대 = 원래 많이 타는 시간대라 곡선이 거꾸로 올라감)
+    모델 예측에 정류장·시간대 차이가 이미 들어 있어서 "출퇴근이라 원래 많이 탄다"는 효과가 빠진다.
+    '떠날 때' 재차율은 그 정류장 승차가 포함돼서 '도착할 때' 재차율로 구간을 나눈다.
     """
     d = scored[scored["has_skt"] & (scored["demand_pred"] > 0)].copy()
     d["rel_capture"] = d["daily_boarding"] / d["demand_pred"]
     d = d[np.isfinite(d["rel_capture"])]
-    # 버스가 '도착할 때' 재차율로 구간을 나눈다.
-    # '떠날 때' 재차율은 그 정류장 승차가 포함돼서, 승차 많은 칸이 저절로 높은 구간에 몰림 (곡선이 거꾸로 올라감)
-    d["load_bin"] = pd.cut(d["load_before_ratio_mid"], SATURATION_BINS, right=False)
+    d["load_bin"] = pd.cut(d["load_before_ratio"], SATURATION_BINS, right=False)
     out = d.groupby("load_bin", observed=False).agg(
         n_cells=("rel_capture", "size"),
         rel_capture_mean=("rel_capture", "mean"),
@@ -153,51 +140,33 @@ def saturation_curve(scored: pd.DataFrame) -> pd.DataFrame:
 
 
 # %%
-def _cell_key(scored: pd.DataFrame) -> pd.Series:
-    """(정류장, 시간대)별 탑승확률. 설정끼리 비교할 때 씀."""
-    d = scored[scored["has_skt"]]
-    return d.set_index(["seq", "hour"])["p_board_mid"]
-
-
-def sensitivity(
-    features_by_radius: dict[float, pd.DataFrame],
-    cfg,
-    ref_radius: float,
-    taus: list[float],
-    variants: list[str],
-    top_n: int = 10,
-) -> pd.DataFrame:
-    """모든 설정 조합을 돌려서 기본 설정과 비교한다.
-
-    spearman_vs_ref    : 기본 설정과 확률 순위가 얼마나 같은가 (1 = 완전히 같음)
-    top10_overlap_vs_ref: 위험 top10 중 몇 %가 겹치는가
-    """
+def sensitivity(features_by_radius: dict, cfg, ref_radius: float, taus: list[float], variants: list[str],
+                top_n: int = 10) -> pd.DataFrame:
+    """모든 설정 조합을 돌려서 기본 설정과 비교 (순위 상관, 위험 top10 겹침)."""
     results = {}
     for radius, feats in features_by_radius.items():
         for tau in taus:
             for v in variants:
                 try:
-                    scored, _, diag = m09.run_model(feats, replace(cfg, tau=tau, signal=v))
+                    scored, _, diag = m07.run_model(feats, replace(cfg, tau=tau, signal=v))
                 except ValueError as e:
                     print(f"sensitivity 생략 (r={radius}, tau={tau}, {v}): {e}")
                     continue
-                results[(radius, tau, v)] = (_cell_key(scored), scored, diag)
-
+                p = scored[scored["has_skt"]].set_index(["seq", "hour"])["p_board_mid"].dropna()
+                results[(radius, tau, v)] = (p, scored, diag)
     ref_key = (ref_radius, cfg.tau, cfg.signal)
     if ref_key not in results:
         raise ValueError(f"기준 설정 {ref_key} 결과가 없습니다.")
     ref = results[ref_key][0]
     ref_top = set(ref.nsmallest(top_n).index)
-
     rows = []
     for (radius, tau, v), (p, scored, diag) in results.items():
         common = ref.index.intersection(p.index)
-        rho = ref.loc[common].rank().corr(p.loc[common].rank())
         skt = scored[scored["has_skt"]]
         rows.append({
             "radius_m": radius, "tau": tau, "signal_variant": v,
             "is_reference": (radius, tau, v) == ref_key,
-            "spearman_vs_ref": float(rho),
+            "spearman_vs_ref": float(ref.loc[common].rank().corr(p.loc[common].rank())),
             f"top{top_n}_overlap_vs_ref": len(ref_top & set(p.nsmallest(top_n).index)) / top_n,
             "share_grade_위험": float((skt["grade"] == "위험").mean()),
             "p_board_mid_mean": float(p.mean()),
@@ -207,72 +176,38 @@ def sensitivity(
 
 
 # %%
-def rule_vs_model(rule_scored: pd.DataFrame, model_scored: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
-    """07번 점수와 09번 확률의 순위 상관, 위험 top10 겹침 비율."""
-    key = ["seq", "hour"]
-    m = model_scored.loc[model_scored["has_skt"], key + ["p_board_mid"]].merge(
-        rule_scored[key + ["boarding_margin_index"]], on=key
-    )
+def bunching_effect(features: pd.DataFrame, cfg, model=None, hours: list[int] | None = None) -> pd.DataFrame:
+    """실측(버스별 공백·재차) vs 고르게 왔다고 칠 때. 차이 = 버스 몰림 때문에 생기는 탑승 실패."""
     rows = []
-    for name, sub in [("전체 시간대", m)]:
-        rho = sub["p_board_mid"].rank().corr(sub["boarding_margin_index"].rank())
-        top_model = set(map(tuple, sub.nsmallest(top_n, "p_board_mid")[key].to_numpy()))
-        top_rule = set(map(tuple, sub.nsmallest(top_n, "boarding_margin_index")[key].to_numpy()))
-        rows.append({
-            "scope": name, "n_cells": len(sub), "spearman": float(rho),
-            f"top{top_n}_overlap": len(top_model & top_rule) / top_n,
-        })
-    return pd.DataFrame(rows)
-
-
-# %%
-def assumption_effect(
-    features: pd.DataFrame, cfg, param: str, values: list[float], model=None, hours: list[int] | None = None
-) -> pd.DataFrame:
-    """가정값(param) 하나를 values로 바꿔가며 결과 비교. 첫 값이 기준(효과 없음).
-    hours를 주면 그 시간대(출퇴근)만 요약."""
-    rows = []
-    for v in values:
-        scored, _, _ = m09.run_model(features, replace(cfg, **{param: v}), model=model)
-        d = scored[scored["has_skt"]]
+    for name, c in (("실측(버스별 공백·재차)", cfg), ("몰림 무시(평균 간격·평균 재차)", replace(cfg, uniform=True))):
+        scored, _, _ = m07.run_model(features, c, model=model)
+        d = scored[scored["has_skt"] & scored["p_board_mid"].notna()]
         if hours is not None:
             d = d[d["hour"].isin(hours)]
-        p = d.set_index(["seq", "hour"])["p_board_mid"]
         rows.append({
-            param: v,
-            "is_default": v == getattr(cfg, param),
-            "p_board_mid_mean": float(p.mean()),
-            "p_board_mid_min": float(p.min()),
+            "방식": name,
+            "p_board_mid_mean": float(d["p_board_mid"].mean()),
+            "p_board_mid_min": float(d["p_board_mid"].min()),
             "n_cells_위험": int((d["grade"] == "위험").sum()),
             "n_cells_보통": int((d["grade"] == "보통").sum()),
+            "추가대기_분_평균": float(d["extra_wait_min_mid"].mean()),
         })
     return pd.DataFrame(rows)
 
 
-def bunching_effect(features, cfg, model=None, cvs=(0.0, 0.5, 1.0), hours=None) -> pd.DataFrame:
-    """버스 몰림 정도(CV)별 비교. 0 = 몰림 없음."""
-    return assumption_effect(features, cfg, "bunching_cv", list(cvs), model, hours)
-
-
-
-# %%
-def main() -> None:
-    features = pd.read_parquet(PROCESSED_DIR / "features.parquet")
-    cfg = m09.ModelConfig()
-    scored, _, _ = m09.run_model(features, cfg)
-
-    print("[1] CV ablation")
-    print(cv_ablation(features, cfg).round(3).to_string(index=False))
-    print("\n[2] 포화 곡선")
-    print(saturation_curve(scored).round(3).to_string(index=False))
-    print("\n[3] tau x 신호 sensitivity (반경 고정)")
-    print(sensitivity({0: features}, cfg, 0, [0.5, 0.6, 0.7], m09.SIGNAL_VARIANTS).round(3).to_string(index=False))
-
-    rule_path = PROCESSED_DIR / "scores.parquet"
-    if rule_path.exists():
-        print("\n[4] 규칙 기반(07) vs 모델(09)")
-        print(rule_vs_model(pd.read_parquet(rule_path), scored).round(3).to_string(index=False))
-
-
-if __name__ == "__main__":
-    main()
+def measured_headway(ev: pd.DataFrame, features: pd.DataFrame, daytype: str, hours: list[int]) -> pd.DataFrame:
+    """교통카드로 잰 정류장별 실제 배차 공백과 몰림 정도 (출근 / 퇴근). 반출용 집계."""
+    e = m07.events_for(ev, daytype)
+    e = e[e["hour"].isin(hours) & e["seq"].isin(features["seq"].unique())].copy()
+    e["band"] = np.where(e["hour"] < 12, "출근", "퇴근")
+    n_days = max(e["date"].nunique(), 1)
+    g = e.groupby(["seq", "band"])
+    gap = g["gap_min"]
+    return pd.DataFrame({
+        "하루_운행대수": g.size() / n_days,
+        "평균공백_분": gap.mean(),
+        "몰림정도_CV": gap.std() / gap.mean(),
+        "1분이내_연속도착_비율": gap.apply(lambda x: float((x.dropna() <= 1).mean())),
+        "평균의2배넘는_공백_비율": gap.apply(lambda x: float((x.dropna() > 2 * x.mean()).mean())),
+        "거의만석_도착_비율": g["load_before"].apply(lambda x: float((x >= 40).mean())),
+    }).reset_index()

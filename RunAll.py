@@ -1,42 +1,36 @@
 """
 RunAll.py
 
-안심구역 안에서 01 -> 02 -> 02b -> 03 -> 03b -> 05 -> 04 -> 06 -> 07 -> 09 -> 08 -> 10 을 한 번에 실행한다.
+안심구역 안에서 01 -> 10 을 한 번에 실행한다.
+
+  01 노선/노선정류장/정류장 정보 -> 9401 노선ID, 정류장 순서·좌표·서울 여부
+  02 교통카드 이용내역 -> 9401 기록 + 9401 정류장의 전체 노선 승차 집계
+  03 버스 한 대씩 정류장 도착 시각·재차·앞차와의 공백
+  04 정류장x시간대 하루 평균 (평일/주말/요일별) + 9401 분담률
+  05 SKT 유동인구 정류장 반경 합산
+  06 합치기 (서울 도심 구간만)
+  07 수요 복원 + 탑승가능확률 (평일 학습 -> 주말·요일 적용)
+  08 검증
+  09 서비스: 기대 대기 시간, 상류 정류장 추천, 대기 시간 부담
+  10 반출 패키지 (export/)
 
 1차 반출이 반려돼서(행 단위 데이터), 모델링과 검증까지 안에서 다 끝내고 결과(export/)만 가지고 나온다.
 안에서 코드를 고칠 기회가 거의 없으니, 비교할 설정(반경, tau, 수요신호 종류)을 미리 다 정해두고 한 번에 돌린다.
 
-[반입할 것] 파일 이름에 언더바(_)가 있으면 반입 불가
-  - 레포 전체 (data/ 폴더 제외)
-  - data/raw/ 에 넣을 공개 데이터 3개 (이름에서 언더바를 빼둘 것)
-      2026년버스노선별정류장별시간대별승하차인원정보(08월).csv   (서울 열린데이터광장)
-      서울시버스정류소위치정보(20260902).xlsx                     (서울 열린데이터광장)
-      HangJeongDongSeoulVer20260701.csv                          (github.com/vuski/admdongkor 경계를 CSV로 변환)
-  - SKT, 도로공사 데이터는 안심구역에 있는 파일을 data/raw/ 에 복사해서 씀
+[반입] 코드만 (파일 이름에 언더바(_)가 있으면 반입 불가). 데이터는 전부 안심구역 데이터
+[안심구역 밖에서 리허설]  python RunAll.py --dummy   -> 가짜 데이터로 전체 실행 -> exportDummy/
+[안심구역 안에서]         data-engineering/teminal.txt 순서대로
 
-[안심구역 밖에서 리허설]
-  python RunAll.py --dummy      # 가짜 SKT/도로공사 데이터로 01~10 전체 실행 -> exportDummy/
-
-[안심구역 안에서]
-  1) 경부고속도로가 지나는 시군구 표기 확인 후 CONFIG의 road_names/sigungu_names 채우기
-       %run data-engineering/05KecRouteIndex.py --list-only
-  2) 원본 파일명 확인 후 CONFIG 수정 (bus_file, flow_file, wkdy_file, road_file, std_ym)
-  3) %run RunAll.py
-  4) 정류장별 혼잡 지수에서 '시군구(동 불일치)'가 나오면
-       %run data-engineering/05KecRouteIndex.py --list-emd
-     로 동 이름 표기를 보고 CONFIG의 stop_emd_override를 채운 뒤 3) 다시 실행
-  5) export/ 폴더만 반출 신청 (ExportManifest.md 첨부)
-
-실행 로그(data/processed/run_log.txt)에는 정류장별 원본 값이 찍히므로 반출 X
+실행 로그(data/processed/run_log.txt)와 data/processed/ 는 행 단위 값이 있어 반출 X
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
-import os
 
 import pandas as pd
 
@@ -48,67 +42,54 @@ PROCESSED_DIR = ROOT / "data" / "processed"
 RAW_DIR = ROOT / "data" / "raw"
 
 # =====================================================================
-# TODO(안심구역): 실제 파일명, 도로명으로 교체
+# TODO(안심구역): 실제 파일명으로 교체 (data/raw 기준)
 # =====================================================================
 CONFIG = {
     "route": "9401",
-    # 공개 데이터 (반입)
-    "bus_file": "2026년버스노선별정류장별시간대별승하차인원정보(08월).csv",
-    "coord_file": "서울시버스정류소위치정보(20260902).xlsx",
-    "boundary_file": "HangJeongDongSeoulVer20260701.csv",  # 행정동 경계 (geojson은 반입 불가라 CSV로 변환해 감)
-    "daily_file": "BusStationBoardingMonth202608.csv",  # 일별 승하차 (평일/주말 나누기용, OA-12912)
-    "holidays": ["20260817"],  # 평일에 낀 공휴일 (8/15 광복절이 토요일 -> 8/17 대체공휴일)
+    # 교통카드 (한국교통안전공단, 안심구역 데이터)
+    "card_file": "교통카드이용내역*.csv",  # 수도권 승하차 이용내역. *로 여러 파일 (예: 일자별로 나뉜 경우)
+    "route_file": "노선정보.csv",  # 노선 정보
+    "route_stop_file": "노선정류장정보.csv",  # 노선정류장 정보
+    "stop_file": "정류장정보.csv",  # 정류장 정보
+    "route_id": None,  # 9401 노선ID를 직접 지정할 때만 (보통 None: 노선 정보에서 찾음)
+    "turnaround_name": "서울역버스환승센터",  # 회차 정류장 이름. 이 전 = 서울역 방향(진입), 이후 = 성남 방향(진출)
+    "card_ym": "202408",  # 교통카드에서 쓸 달 (SKT 기준년월과 같게). 파일에 다른 달이 있어도 이 달만 씀
+    "holidays": ["20240815"],  # 교통카드 기간의 평일 공휴일 (2024년 8월 15일 광복절, 목) -> 일요일로 침
     # SKT
     "flow_file": "seoul_flow_time_202408.csv",  # SKT_003 시간대별
     "wkdy_file": "seoul_flow_wkdy_202408.csv",  # SKT_002 요일별 (통근 보정용)
-    "std_ym": "202408",  # SKT는 2024년 데이터만 있음. 승하차(2026년 8월)와 같은 8월로 맞춤
+    "std_ym": "202408",  # SKT 기준년월 = 교통카드와 같은 달
     "radii": [100.0, 150.0, 200.0],  # 정류장 반경(m). 세 개 다 돌려서 비교
     "ref_radius": 150.0,  # 최종 결과에 쓸 반경
-    # 도로공사: 9401이 지나는 경부고속도로 구간 (05 --list-only 로 시군구 표기 확인 후 채울 것)
-    "road_file": "TB_KOTI_ROAD TRAFFIC INDICATOR.csv",
-    "road_names": ["경부고속도로"],
-    "sigungu_names": ["성남시 분당구", "서초구"],
-    # 정류장별 지수: 도로공사 EMD_NAME 표기가 행정동 이름과 다를 때만 채움 {seq: [EMD_NAME, ...]}
-    # 05 --list-emd 로 표기 확인
-    "stop_emd_override": {},
     # 모델
     "seat_capacity": 41,
-    "days": 20,  # 일별 파일이 없을 때만 씀 (월 합계 / 20일). 있으면 평일/주말 하루 평균으로 자동 계산
-    "headway_min": 3,  # 평일 배차간격 범위(분)
-    "headway_max": 7,
-    # 주말 배차간격(분). 공개 자료: 토요일 4~5분, 공휴일 5~7분
-    "headway_weekend_min": 4,
-    "headway_weekend_max": 7,
-    # 요일별 배차간격(분). 월~금은 평일 값(headway_min/max)을 씀
-    "headway_sat_min": 4,  # 토요일 4~5분
-    "headway_sat_max": 5,
-    "headway_sun_min": 5,  # 일요일·공휴일 5~7분
-    "headway_sun_max": 7,
-    "tau": 0.6,  # 좌석의 60% 이하로 찼으면 "자리가 넉넉했다"로 봄
+    "tau": 0.6,  # 버스 1대당 도착 시 재차가 좌석의 60% 이하면 "자리가 넉넉했다"로 봄
     "taus": [0.5, 0.6, 0.7],  # 08번에서 비교할 tau
-    "signal": "flow_x_share",  # 수요신호 = 유동인구 x 9401 분담률(정류장마다 하루 전체로 한 번 계산)
+    "signal": "flow_x_share",  # 수요신호 = 유동인구 x 9401 분담률(정류장마다 기간 전체로 한 번)
     "use_commute": True,  # 통근 보정: 요일별 유동인구로 직장인 비중 반영 (출퇴근 시간대만)
-    # 버스 몰림 정도 (배차간격 표준편차 / 평균). 0 = 일정, 1 = 완전 무작위. 실측값이 없어 중간값 사용
-    # 근거: 평일에 2~4대가 몰려 온 뒤 6~10분 이상 공백이 생기는 일이 잦다 (나무위키 9401, 2026)
-    "bunching_cv": 0.5,
-    "bunching_cvs": [0.0, 0.5, 1.0],  # 08번에서 비교할 값
-    # 도로공사 혼잡 지수로 정류장마다 몰림 정도를 다르게 (평균은 bunching_cv 그대로)
-    "bunching_by_road": True,
-    # 11번 서비스 계산용 기준값 (모델 가정이 아니라 안내 계산용 일반값)
-    "service": {"walk_speed_kmh": 4.5, "detour": 1.3, "max_walk_m": 800, "dwell_min": 0.5, "workdays_per_year": 250},
-    # 07번 가중합 점수의 가중치 (09번과 비교용)
-    "rule_weights": {"w_load": 0.35, "w_flow": 0.4, "w_congestion": 0.25},
+    # 09번 서비스 계산용 기준값 (모델 가정이 아니라 안내 계산용 일반값)
+    "service": {"walk_speed_kmh": 4.5, "detour": 1.3, "max_walk_m": 500, "max_walk_point_m": 1200, "bus_speed_kmh": 15.0,
+                "min_saving_min": 3.0, "max_ride_back_min": 15.0, "workdays_per_year": 250},
+    # 위치 기반 추천 예시 (정류장이 아닌 곳). 지하철역 대략 좌표 (이름, 위도, 경도)
+    "service_points": [
+        ("을지로입구역", 37.5660, 126.9826), ("시청역", 37.5657, 126.9769), ("서울역", 37.5547, 126.9707),
+        ("명동역", 37.5609, 126.9863), ("종각역", 37.5702, 126.9831), ("광화문역", 37.5710, 126.9768),
+        ("회현역", 37.5585, 126.9783), ("충무로역", 37.5612, 126.9942),
+    ],
     "export_dir": "export",
 }
 
 DUMMY_OVERRIDES = {
-    "flow_file": "dummy_flow_time.csv",
-    "wkdy_file": "dummy_flow_wkdy.csv",
-    "daily_file": "dummy_bus_daily.csv",
-    "std_ym": None,
-    "road_file": "dummy_road_indicator.csv",
+    "card_file": "dummyCard.csv",
+    "route_file": "dummyRoute.csv",
+    "route_stop_file": "dummyRouteStop.csv",
+    "stop_file": "dummyStop.csv",
+    "flow_file": "dummyFlowTime.csv",
+    "wkdy_file": "dummyFlowWkdy.csv",
     "export_dir": "exportDummy",
 }
+COMMUTE_HOURS = list(range(6, 10)) + list(range(16, 24))  # 출근 6~9시, 퇴근 16~23시
+DOW_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 class _Tee:
@@ -125,22 +106,13 @@ class _Tee:
             st.flush()
 
 
-def headway_of(c: dict, daytype: str) -> tuple[float, float]:
-    """요일별 배차간격 (최소, 최대). 월~금 = 평일, 토 / 일·공휴일 = 각각."""
-    if daytype in ("sat", "sun"):
-        return c[f"headway_{daytype}_min"], c[f"headway_{daytype}_max"]
-    if daytype == "weekend":
-        return c["headway_weekend_min"], c["headway_weekend_max"]
-    return c["headway_min"], c["headway_max"]
-
-
 def step(title: str) -> None:
     print(f"\n{'=' * 70}\n{title}\n{'=' * 70}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="안심구역 일괄 실행")
-    parser.add_argument("--dummy", action="store_true", help="가짜 SKT/도로공사 데이터로 리허설")
+    parser.add_argument("--dummy", action="store_true", help="가짜 데이터로 리허설 (MakeDummyRaw.py가 만듦)")
     args = parser.parse_args()
     cfg_d = {**CONFIG, **(DUMMY_OVERRIDES if args.dummy else {})}
 
@@ -155,189 +127,151 @@ def main() -> None:
 
 
 def run(c: dict, dummy: bool = False) -> None:
-    m01 = load_module("data-engineering/01IngestBus.py")
-    m01b = load_module("data-engineering/01bDayTypeRatio.py")
-    m02 = load_module("data-engineering/02StopMaster.py")
-    m02b = load_module("data-engineering/02bStopDong.py")
-    m03 = load_module("data-engineering/03LoadProfile.py")
-    m03b = load_module("data-engineering/03bRouteShare.py")
-    m04 = load_module("data-engineering/04SktCatchment.py")
-    m05 = load_module("data-engineering/05KecRouteIndex.py")
+    m01 = load_module("data-engineering/01RouteStops.py")
+    m02 = load_module("data-engineering/02CardExtract.py")
+    m03 = load_module("data-engineering/03BusEvents.py")
+    m04 = load_module("data-engineering/04LoadProfile.py")
+    m05 = load_module("data-engineering/05SktCatchment.py")
     m06 = load_module("data-engineering/06BuildFeatures.py")
-    m07 = load_module("modeling/07RuleBasedScore.py")
+    m07 = load_module("modeling/07BoardingProbability.py")
     m08 = load_module("modeling/08Validate.py")
-    m09 = load_module("modeling/09BoardingProbability.py")
+    m09 = load_module("modeling/09ServiceRecommend.py")
     m10 = load_module("modeling/10ExportResults.py")
-    m11 = load_module("modeling/11ServiceRecommend.py")
-    route = c["route"]
+    seats = c["seat_capacity"]
 
-    step("01. 승하차 원본 CSV -> 정류장x시간대")
-    bus_long_all = m01.ingest(RAW_DIR / c["bus_file"])  # 전체 노선 (03b 분담률 계산용)
-    bus_long_all.to_parquet(PROCESSED_DIR / "bus_long_all.parquet", index=False)
-    bus_long = bus_long_all[bus_long_all["노선번호"].astype(str) == route].reset_index(drop=True)
-    bus_long.to_parquet(PROCESSED_DIR / f"bus_long_{route}.parquet", index=False)
-    print(f"전체 노선 {bus_long_all['노선번호'].nunique()}개, {route}번 {len(bus_long):,}행")
+    if dummy and not (RAW_DIR / c["card_file"]).exists():
+        step("(리허설) 가짜 데이터 생성")
+        load_module("data-engineering/MakeDummyRaw.py").make_all()
 
-    step("01b. 평일/주말 승하차 비율 (일별 파일)")
-    daily_path = RAW_DIR / c["daily_file"]
-    if dummy and not daily_path.exists():
-        load_module("data-engineering/MakeDummyRaw.py").make_dummy_daily(route, bus_long)
-    if daily_path.exists():
-        ratio = m01b.build_daytype_ratio(m01b.load_daily(daily_path), route, c["holidays"])
-        ratio.to_parquet(PROCESSED_DIR / f"daytype_ratio_{route}.parquet", index=False)
-        print(f"평일 {ratio['n_weekday_days'].iloc[0]}일, 주말·공휴일 {ratio['n_weekend_days'].iloc[0]}일, "
-              f"노선 전체 주말/평일 승차 비율 {ratio['board_weekend'].sum() / ratio['board_weekday'].sum():.2f}")
+    step("01. 9401 노선ID와 정류장 순서 (노선 / 노선정류장 / 정류장 정보)")
+    if c["route_id"]:
+        route_ids = [str(c["route_id"])]
     else:
-        ratio = None
-        print(f"⚠ {daily_path.name} 없음 -> 평일/주말 구분 없이 진행 (월 합계 / {c['days']}일)")
+        route_ids = m01.find_route_ids(RAW_DIR / c["route_file"], c["route"])["route_id"].tolist()
+    stop_all = m01.build_stop_master(RAW_DIR / c["route_stop_file"], RAW_DIR / c["stop_file"], route_ids)
+    stop_all = m01.add_direction(stop_all, c["turnaround_name"])
+    m01.summary(stop_all)
 
-    step("02. 정류장 좌표")
-    stop_master = m02.build_stop_master(
-        m02.load_bus_stops(PROCESSED_DIR / f"bus_long_{route}.parquet"),
-        m02.load_coord_source(RAW_DIR / c["coord_file"]),
-    )
-    stop_master.to_parquet(PROCESSED_DIR / f"stop_master_{route}.parquet", index=False)
+    step("02. 교통카드: 9401 기록 + 9401 정류장 전체 노선 승차 (전체를 한 번 훑음, 오래 걸림)")
+    seoul_ids = set(stop_all.loc[stop_all["segment"] == "서울_도심루프", "sttn_id"])
+    ext = m02.extract(m02.card_files(c["card_file"]), route_ids, set(stop_all["sttn_id"]), seoul_ids, c["card_ym"])
+    route_id = ext["route_id"]
+    stops = stop_all[stop_all["route_id"].str.lstrip("0") == route_id].reset_index(drop=True)
+    stops.to_parquet(PROCESSED_DIR / "stopMaster.parquet", index=False)
+    print(f"9401 노선ID = {route_id} (정류장 {len(stops)}개)")
+    print(stops[["seq", "stop_label", "segment", "is_seoul"]].to_string(index=False))
+    quality = {"카드파일_전체기간": ext["days"], **m02.describe(ext["card"])}
 
-    step("02b. 정류장 -> 행정동")
-    stop_dong = m02b.build_stop_dong(stop_master, RAW_DIR / c["boundary_file"])
-    stop_dong.to_parquet(PROCESSED_DIR / f"stop_dong_{route}.parquet", index=False)
-    print(stop_dong[["seq", "stop_name", "sgg_nm", "dong_nm"]].to_string(index=False))
+    step("03. 버스 한 대씩 도착 시각·재차·앞차와의 공백")
+    events, q3, od = m03.build_bus_events(ext["card"], stops, c["holidays"])
+    quality.update(q3)
+    for k, v in q3.items():
+        print(f"  {k}: {v:.1%}" if isinstance(v, float) and "비율" in k else f"  {k}: {v}")
+    print("  (정류장순서_일치도는 1에 가까워야 정류장 연결·운행 나누기가 맞음)")
+    del ext["card"]
 
-    step("03. 정류장x시간대 재차 (평일 / 주말)")
-    if ratio is not None:
-        # 승하차가 하루 평균 단위가 되므로 이후 계산의 일수는 1
-        days = 1
-        load_profile = m03.build_load_profile_from(
-            m03.split_daytype(bus_long, ratio, "weekday"), stop_master, c["headway_min"], c["headway_max"], days)
-        load_profile_we = m03.build_load_profile_from(
-            m03.split_daytype(bus_long, ratio, "weekend"), stop_master,
-            c["headway_weekend_min"], c["headway_weekend_max"], days)
-        load_profile_we.to_parquet(PROCESSED_DIR / f"load_profile_weekend_{route}.parquet", index=False)
-        # 요일별 (월~일). 배차는 월~금 평일, 토/일 각각
-        load_profile_dow = {
-            k: m03.build_load_profile_from(m03.split_daytype(bus_long, ratio, k), stop_master, *headway_of(c, k), days)
-            for k in m01b.DOW_KEYS
-        }
-    else:
-        days = c["days"]
-        load_profile = m03.build_load_profile(route, c["headway_min"], c["headway_max"], days)
-        load_profile_we = None
-        load_profile_dow = {}
-    load_profile.to_parquet(PROCESSED_DIR / f"load_profile_{route}.parquet", index=False)
+    step("04. 정류장x시간대 하루 평균 (평일 / 주말 / 요일별) + 9401 분담률")
+    profile = {k: m04.build_profile(events, stops, k, seats) for k in ["weekday", "weekend"] + DOW_KEYS}
+    share = m04.route_share(ext["stop_board"], stops)
+    wd = profile["weekday"]
+    print("서울 구간 평일 18시:")
+    print(wd[(wd["segment"] == "서울_도심루프") & (wd["hour"] == 18)][
+        ["seq", "stop_label", "n_buses", "headway_obs", "gap_cv", "full_bus_share"]].round(2).to_string(index=False))
+    if share is not None:
+        print("정류장별 9401 분담률:", share.drop_duplicates("seq").set_index("seq")["share_all_stop"].round(3).to_dict())
 
-    step("03b. 9401 분담률")
-    route_share = m03b.build_route_share(bus_long_all, route)
-    route_share.to_parquet(PROCESSED_DIR / f"route_share_{route}.parquet", index=False)
-
-    if dummy:
-        step("(리허설) 가짜 SKT/도로공사 데이터 생성")
-        mdummy = load_module("data-engineering/MakeDummyRaw.py")
-        mdummy.make_dummy_flow(route)
-        mdummy.make_dummy_wkdy(route)
-        mdummy.make_dummy_road_indicator()
-
-    step("05. 도로공사 혼잡 노출 지수 (노선 단위 + 정류장별)")
-    road = m05.load_road_indicator(RAW_DIR / c["road_file"])
-    segs = m05.filter_route_segments(road, c["road_names"], c["sigungu_names"])
-    kec_overall = pd.DataFrame([m05.compute_congestion_exposure_index(segs)])
-    kec_by_sigungu = m05.breakdown_by_sigungu(segs)
-    kec_table = pd.concat([kec_overall.assign(SIGUNGU_NAME="전체"), kec_by_sigungu], ignore_index=True)
-    print(kec_table.round(3).to_string(index=False))
-    kec_stop = m05.compute_stop_congestion_index(road, stop_dong, c["stop_emd_override"])
-    print(kec_stop.round(3).to_string(index=False))
-
-    step("04 + 06. SKT 유동인구 반경별 집계 -> feature 병합")
-    flow = m04.load_flow_population(RAW_DIR / c["flow_file"], std_ym=c["std_ym"])
-    wkdy = m04.load_weekday_population(RAW_DIR / c["wkdy_file"], std_ym=c["std_ym"])
-    print(f"SKT 요일별 셀 수: {len(wkdy):,}")
-    print(f"SKT 셀 수: {len(flow):,}")
+    step("05 + 06. SKT 유동인구 반경별 집계 -> 합치기")
+    flow = m05.load_skt(RAW_DIR / c["flow_file"], c["std_ym"])
+    wkdy = m05.load_skt(RAW_DIR / c["wkdy_file"], c["std_ym"])
+    print(f"SKT 시간대별 셀 {len(flow):,}개, 요일별 셀 {len(wkdy):,}개")
     features_by_radius = {}
     for radius in c["radii"]:
-        print(f"\n--- 반경 {radius}m ---")
-        fp = m04.build_flow_profile(route, c["flow_file"], radius, flow=flow)
-        wp = m04.build_weekday_profile(route, wkdy, radius)
-        features_by_radius[radius] = m06.merge_all(load_profile, fp, kec_overall, route_share, kec_stop, wp)
+        fp = m05.build_flow_profile(stops, flow, radius)
+        wp = m05.build_weekday_profile(stops, wkdy, radius)
+        features_by_radius[radius] = m06.merge_all(profile["weekday"], fp, share, wp)
         if radius == c["ref_radius"]:
             ref_fp, ref_wp = fp, wp
     features = features_by_radius[c["ref_radius"]]
-    features_we = (
-        m06.merge_all(load_profile_we, ref_fp, kec_overall, route_share, kec_stop, ref_wp)
-        if load_profile_we is not None else None
-    )
-    features_dow = {
-        k: m06.merge_all(lp, ref_fp, kec_overall, route_share, kec_stop, ref_wp) for k, lp in load_profile_dow.items()
-    }
+    features_by_day = {k: m06.merge_all(p, ref_fp, share, ref_wp) for k, p in profile.items()}
     features.to_parquet(PROCESSED_DIR / "features.parquet", index=False)  # 안심구역 안에서만 (반출 X)
 
-    step("07. 규칙 기반 탑승 여유 지수 (비교용)")
-    rule_scored = m07.compute_margin_score(features, c["seat_capacity"], **c["rule_weights"])
-
-    step("09. 수요 복원 + 탑승가능확률 (평일 학습 -> 주말 적용)")
-    cfg = m09.ModelConfig(
-        seat_capacity=c["seat_capacity"], days=days, headway_min=c["headway_min"],
-        headway_max=c["headway_max"], tau=c["tau"], signal=c["signal"], use_commute=c["use_commute"],
-        daytype="weekday" if ratio is not None else "all", bunching_cv=c["bunching_cv"], bunching_by_road=c["bunching_by_road"],
-    )
-    model_scored, model, diag = m09.run_model(features, cfg)
+    step("07. 수요 복원 + 탑승가능확률 (평일 학습 -> 주말·요일 적용)")
+    cfg = m07.ModelConfig(seat_capacity=seats, tau=c["tau"], signal=c["signal"], use_commute=c["use_commute"],
+                          daytype="weekday", bus_events=events)
+    scored, model, diag = m07.run_model(features, cfg)
     print("[평일]", diag)
-    print(m09.worst_cells(model_scored).round(3).to_string(index=False))
-    model_scored_we = diag_we = cfg_we = None
-    if features_we is not None:
-        cfg_we = replace(cfg, headway_min=c["headway_weekend_min"], headway_max=c["headway_weekend_max"], daytype="weekend")
-        model_scored_we, _, diag_we = m09.run_model(features_we, cfg_we, model=model)
-        print("[주말]", diag_we)
-        print(m09.worst_cells(model_scored_we).round(3).to_string(index=False))
-    # 요일별: 평일 모델을 그대로 적용 (그 요일 승하차·SKT 요일 유동인구·배차)
-    scored_dow = {}
-    for k, feats in features_dow.items():
-        hmin, hmax = headway_of(c, k)
-        scored_dow[k], _, _ = m09.run_model(feats, replace(cfg, headway_min=hmin, headway_max=hmax, daytype=k), model=model)
-    if scored_dow:
-        print("[요일별 최저 탑승확률]", {k: round(float(s.loc[s["has_skt"], "p_board_mid"].min()), 3) for k, s in scored_dow.items()})
+    print(m07.worst_cells(scored).round(3).to_string(index=False))
+    scored_we, _, diag_we = m07.run_model(features_by_day["weekend"], replace(cfg, daytype="weekend"), model=model)
+    print("[주말]", diag_we)
+    print(m07.worst_cells(scored_we).round(3).to_string(index=False))
+    scored_dow = {k: m07.run_model(features_by_day[k], replace(cfg, daytype=k), model=model)[0] for k in DOW_KEYS}
+    print("[요일별 최저 탑승확률]", {k: round(float(s.loc[s["has_skt"], "p_board_mid"].min()), 3) for k, s in scored_dow.items()})
 
     step("08. 검증")
     cv = m08.cv_ablation(features, cfg)
     print(cv.round(3).to_string(index=False))
-    saturation = m08.saturation_curve(model_scored)
+    saturation = m08.saturation_curve(scored)
     print(saturation.round(3).to_string(index=False))
-    sens = m08.sensitivity(features_by_radius, cfg, c["ref_radius"], c["taus"], m09.SIGNAL_VARIANTS)
+    sens = m08.sensitivity(features_by_radius, cfg, c["ref_radius"], c["taus"], m07.SIGNAL_VARIANTS)
     print(sens.round(3).to_string(index=False))
-    rvm = m08.rule_vs_model(rule_scored, model_scored)
-    print(rvm.round(3).to_string(index=False))
-    commute_hours = list(range(6, 10)) + list(range(16, 24))
-    bunch = m08.bunching_effect(features, cfg, model=model, cvs=c["bunching_cvs"], hours=commute_hours).assign(daytype="평일")
-    if features_we is not None:
-        bunch = pd.concat([bunch, m08.bunching_effect(
-            features_we, cfg_we, model=model, cvs=c["bunching_cvs"], hours=commute_hours).assign(daytype="주말")])
-    print(bunch.round(3).to_string(index=False))
-    # 도로공사 데이터 효과: 모든 정류장 같은 몰림 vs 지나온 길 혼잡도 반영
-    road = m08.assumption_effect(features, cfg, "bunching_by_road", [False, True], model=model,
-                                 hours=commute_hours).assign(daytype="평일")
-    if features_we is not None:
-        road = pd.concat([road, m08.assumption_effect(features_we, cfg_we, "bunching_by_road", [False, True],
-                                                      model=model, hours=commute_hours).assign(daytype="주말")])
-    print(road.round(3).to_string(index=False))
+    bunching = pd.concat([
+        m08.bunching_effect(features, cfg, model, COMMUTE_HOURS).assign(구분="평일"),
+        m08.bunching_effect(features_by_day["weekend"], replace(cfg, daytype="weekend"), model, COMMUTE_HOURS).assign(구분="주말"),
+    ], ignore_index=True)
+    print(bunching.round(3).to_string(index=False))
+    headway = pd.concat([
+        m08.measured_headway(events, features, "weekday", COMMUTE_HOURS).assign(daytype="평일"),
+        m08.measured_headway(events, features, "weekend", COMMUTE_HOURS).assign(daytype="주말"),
+    ], ignore_index=True)
+    print(headway.round(2).to_string(index=False))
+    # 그림용: 버스가 고르게 왔다고 칠 때 (정류장별 몰림 효과 F11)
+    scored_uniform = m07.run_model(features, replace(cfg, uniform=True), model=model)[0]
 
-    step("11. 서비스: 상류 정류장 추천 + 대기 시간 부담 (평일)")
-    geom = m11.stop_geometry(stop_master, kec_stop)
-    rec = m11.recommend(model_scored, geom, commute_hours, c["service"])
-    burden = m11.wait_burden(model_scored, rec, c["service"])
-    print(rec[rec["saving_min"] > 0].round(1).to_string(index=False))
+    step("09. 서비스: 기대 대기 시간 + 상류 정류장 추천 + 대기 시간 부담 (평일 / 주말 / 요일별)")
+    geom = m09.stop_geometry(stops)
+    other_bus = m04.other_bus_times(ext["pair_trips"], stops, route_id, c["holidays"])
+    print(f"서울 정류장끼리 다른 버스로 이동 가능한 (정류장 쌍 x 시간대): {len(other_bus)}개")
+    by_day = {"weekday": scored, "weekend": scored_we, **scored_dow}
+    rec_by_day = {k: m09.recommend(sc_k, geom, COMMUTE_HOURS, c["service"], m04.ride_times(events, k), other_bus, k)
+                  for k, sc_k in by_day.items()}
+    rec = rec_by_day["weekday"]
+    # 위치 기반: 예시 위치(지하철역) + 도심 격자 (평일 출근·퇴근에서 가장 붐비는 시간)
+    pts = m09.points_utmk(c["service_points"])
+    rides_wd = m04.ride_times(events, "weekday")
+    rec_points = pd.concat([
+        m09.recommend_from_points(scored, geom, pts, COMMUTE_HOURS, c["service"], rides_wd).assign(day="평일"),
+        m09.recommend_from_points(scored_we, geom, pts, COMMUTE_HOURS, c["service"], m04.ride_times(events, "weekend")).assign(day="주말"),
+    ], ignore_index=True)
+    sk = scored[scored["has_skt"]]
+    map_hours = [int(sk[sk["hour"].isin(range(6, 10))].groupby("hour")["p_board_mid"].mean().idxmin()),
+                 int(sk[sk["hour"].isin(range(16, 24))].groupby("hour")["p_board_mid"].mean().idxmin())]
+    rec_grid = m09.recommend_from_points(scored, geom, m09.grid_points(geom), map_hours, c["service"], rides_wd)
+    print(rec_points[rec_points["saving_min"] > 0].round(1).to_string(index=False) if len(rec_points) else "위치 추천 없음")
+    burden = m09.wait_burden(scored, rec, c["service"])
+    burden_we = m09.wait_burden(scored_we, rec_by_day["weekend"], c["service"])
+    print(rec[rec["saving_min"] > 0].round(1).to_string(index=False) if len(rec) else "정류장 추천 없음")
+    print("요일별 추천 수:", {k: int((v["saving_min"] > 0).sum()) if len(v) else 0 for k, v in rec_by_day.items()})
     print(burden.round(1).to_string(index=False))
 
     step("10. 반출 패키지")
-    run_params = {k: c[k] for k in ["bus_file", "daily_file", "flow_file", "wkdy_file", "std_ym", "radii", "ref_radius", "road_names", "sigungu_names", "taus"]}
+    run_params = {k: c[k] for k in ["card_file", "card_ym", "route_file", "route_stop_file", "stop_file", "holidays",
+                                    "flow_file", "wkdy_file", "std_ym", "radii", "ref_radius", "taus"]}
+    run_params["route_id_used"] = route_id
     m10.export_all(
         {
-            "model_scored": model_scored, "model": model, "diag": diag, "cfg": cfg,
-            "model_scored_weekend": model_scored_we, "diag_weekend": diag_we, "cfg_weekend": cfg_we,
-            "scored_by_dow": scored_dow,
+            "model_scored": scored, "model": model, "diag": diag, "cfg": cfg,
+            "model_scored_weekend": scored_we, "diag_weekend": diag_we, "scored_by_dow": scored_dow,
+            "cv": cv, "saturation": saturation, "sensitivity": sens, "bunching": bunching,
+            "measured_headway": headway, "card_quality": quality,
             "service_rec": rec, "wait_burden": burden, "service_cfg": c["service"],
-            "cv": cv, "saturation": saturation, "sensitivity": sens, "rule_vs_model": rvm,
-            "kec_table": kec_table, "kec_stop": kec_stop, "bunching": bunch, "road_bunching": road,
+            "service_rec_by_day": rec_by_day, "wait_burden_weekend": burden_we,
+            "service_points": rec_points, "service_grid": rec_grid, "geom": geom, "map_hours": map_hours,
+            # 그림용 (집계해서 그리기만 하고 표로 내보내지 않음)
+            "events": events, "stops": stops, "od": od, "scored_uniform": scored_uniform, "holidays": c["holidays"],
             "run_params": run_params,
         },
         ROOT / c["export_dir"],
+        m09,
     )
 
 
