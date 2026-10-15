@@ -40,6 +40,7 @@ ROUTE_STOP_COLS = {"date": "OPRAT_DATE", "route_id": "ROUTE_ID", "seq": "STTN_SE
 STOP_COLS = {"date": "OPRAT_DATE", "sttn_id": "STTN_ID", "name": "STTN_NMA", "area": "USE_AREA_CD",
              "ars": "STTN_ARSNO", "x": "STTN_GPS_X_XYZ", "y": "STTN_GPS_Y_XYZ"}
 CHUNK = 1_000_000
+KR = {"OPRAT_DATE": "운행일자", "TCBO_ID": "정산사ID", "ROUTE_ID": "노선ID", "ROUTE_NMA": "노선명칭", "ROUTE_NO": "노선번호", "ROUTE_STTN_CNT": "노선정류장수", "STTN_SEQ": "정류장순번", "STTN_ID": "정류장ID", "STTN_NMA": "정류장명칭", "STTN_X_XYZ": "정류장X좌표", "STTN_Y_XYZ": "정류장Y좌표", "STTN_ARSNO": "정류장ARS번호", "USE_AREA_CD": "법정동코드", "STTN_GPS_X_XYZ": "정류장GPSX좌표", "STTN_GPS_Y_XYZ": "정류장GPSY좌표", "TCBO_CAR_ID": "정산사차량ID", "TRFFC_WAY_CD": "교통수단코드", "TCBO_ROUTE_ID": "정산사노선ID", "GIN_DT": "승차일시", "TCBO_GIN_STTN_ID": "정산사승차정류장ID", "GFF_DT": "하차일시", "TCBO_GFF_STTN_ID": "정산사하차정류장ID", "USER_CNT": "이용자수"}
 SEOUL_AREA_PREFIX = "11"  # 법정동코드 앞 두 자리 (서울특별시)
 
 
@@ -68,7 +69,7 @@ def resolve_columns(cols: list[str], spec: dict, name: str, required: tuple = ()
     """정의서 영어 코드로 실제 컬럼 찾기. "운행일자(OPRAT_DATE)"처럼 붙은 표기도 됨. 반환 {실제 컬럼: 우리 이름}"""
     out = {}
     for key, code in spec.items():
-        hit = next((c for c in cols if c.upper() == code or c.upper().endswith(f"({code})")), None)
+        hit = next((c for c in cols if c.upper() == code or c.upper().endswith(f"({code})") or c.replace(" ", "") == KR.get(code)), None)
         if hit is None and key in required:
             raise KeyError(f"{name}에 {code} 컬럼이 없습니다. 실제 컬럼: {cols}")
         if hit is not None:

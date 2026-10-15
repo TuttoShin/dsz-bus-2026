@@ -47,10 +47,10 @@ RAW_DIR = ROOT / "data" / "raw"
 CONFIG = {
     "route": "9401",
     # 교통카드 (한국교통안전공단, 안심구역 데이터)
-    "card_file": "교통카드이용내역*.csv",  # 수도권 승하차 이용내역. *로 여러 파일 (예: 일자별로 나뉜 경우)
-    "route_file": "노선정보.csv",  # 노선 정보
-    "route_stop_file": "노선정류장정보.csv",  # 노선정류장 정보
-    "stop_file": "정류장정보.csv",  # 정류장 정보
+    "card_file": "/kdata/import_data/TB_KTS_DWTCD_METROPOLITAN/202408/*.csv",  # 수도권 승하차 이용내역. *로 여러 파일 (예: 일자별로 나뉜 경우)
+    "route_file": "/kdata/import_data/TB_KTS_ROUTE/202408/TB_KTS_ROUTE_20240801.csv",  # 노선 정보
+    "route_stop_file": "/kdata/import_data/TB_KTS_ROUTESTTN/202408/TB_KTS_ROUTESTTN_20240801.csv",  # 노선정류장 정보
+    "stop_file": "/kdata/import_data/TB_KTS_STTN/202408/TB_KTS_STTN_20240801.csv",  # 정류장 정보
     "route_id": None,  # 9401 노선ID를 직접 지정할 때만 (보통 None: 노선 정보에서 찾음)
     "turnaround_name": "서울역버스환승센터",  # 회차 정류장 이름. 이 전 = 서울역 방향(진입), 이후 = 성남 방향(진출)
     "card_ym": "202408",  # 교통카드에서 쓸 달 (SKT 기준년월과 같게). 파일에 다른 달이 있어도 이 달만 씀
