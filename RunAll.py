@@ -314,6 +314,11 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     print(rec[rec["saving_min"] > 0].round(1).to_string(index=False) if len(rec) else "정류장 추천 없음")
     print("요일별 추천 수:", {k: int((v["saving_min"] > 0).sum()) if len(v) else 0 for k, v in rec_by_day.items()})
     print(burden.round(1).to_string(index=False))
+    # 회피 가능한 탑승 실패: 첫 9401을 만석으로 못 탄 사람 중 정류장 변경·출발 시각 조정으로 더 빨리 탈 수 있었던 비율
+    avoid, avoid_detail = m09.avoidable_failures(slots["weekday"], rec, geom, COMMUTE_HOURS)
+    a0 = avoid["회피가능_비율"]
+    print(f"회피 가능한 탑승 실패 (평일 출퇴근, 가정 9가지): {a0.min():.0%} ~ {a0.max():.0%}")
+    print(avoid.round(3).to_string(index=False))
     deck = deck_context(geom, c["deck_stops"], bus_prof, scored_dow)
     print("장표 대표 정류장·시간:", deck)
 
@@ -334,7 +339,7 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
             "slots": slots,
             # 장표용
             "bus_profile": bus_prof, "validation": validation, "split_by_grade": split_by_grade, "demand_sens": demand_sens,
-            "flow_pattern": flow_pattern, "share": share, "deck": deck,
+            "flow_pattern": flow_pattern, "share": share, "deck": deck, "avoid": avoid, "avoid_detail": avoid_detail,
             # 그림용 (집계해서 그리기만 하고 표로 내보내지 않음)
             "events": events, "stops": stops, "od": od, "scored_uniform": scored_uniform, "holidays": c["holidays"],
             "run_params": run_params,

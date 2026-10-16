@@ -1210,11 +1210,58 @@ def s19_results(r: dict, save) -> None:
     save(fig, "S19bFocusStopDowHour", "[장표19 ②] 말단 정류장 요일 x 시간대 기대 대기 시간 (등급: 10분 이하 여유 / 20분 초과 위험)")
 
 
+AVOID_COLOR = {"정류장 변경·시각 조정 둘 다": SERIES[0], "정류장 변경만": SERIES[6], "출발 시각 조정만": SERIES[3], "대안 없음": AXIS}
+
+
+def s19_avoidable(r: dict, save) -> None:
+    """회피 가능한 탑승 실패: 기본 가정의 구성(누적 막대) + 가정 9가지(S x W) 히트맵으로 범위."""
+    import matplotlib.pyplot as plt
+    av = r.get("avoid")
+    if av is None or not len(av):
+        return
+    b = av[av["기본가정"]].iloc[0] if av["기본가정"].any() else av.iloc[0]
+    parts = {"정류장 변경·시각 조정 둘 다": b["둘다_비율"],
+             "정류장 변경만": b["정류장변경_가능_비율"] - b["둘다_비율"],
+             "출발 시각 조정만": b["시각조정_가능_비율"] - b["둘다_비율"],
+             "대안 없음": 1 - b["회피가능_비율"]}
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 3.6), gridspec_kw={"width_ratios": [1.5, 1]})
+    left = 0.0
+    for k, v in parts.items():
+        a1.barh(0, v, left=left, color=AVOID_COLOR[k], height=0.5, label=k)
+        if v >= 0.05:
+            a1.text(left + v / 2, 0, f"{v:.0%}", ha="center", va="center", fontsize=10, fontweight="bold",
+                    color="white" if k != "대안 없음" else INK)
+        left += v
+    a1.set_xlim(0, 1)
+    a1.set_yticks([])
+    a1.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    a1.grid(axis="y", visible=False)
+    a1.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=4, fontsize=8)
+    a1.set_title(f"기본 가정 (S = {b['단축기준_분(S)']:.0f}분, ±{b['시각조정범위_분(W)']:.0f}분)", fontsize=10)
+    piv = av.pivot_table(index="단축기준_분(S)", columns="시각조정범위_분(W)", values="회피가능_비율")
+    im = a2.imshow(piv.to_numpy(float), cmap=_cmap(BLUE_RAMP, "avoid"), vmin=0, vmax=1, aspect="auto")
+    a2.grid(False)
+    for i in range(piv.shape[0]):
+        for j in range(piv.shape[1]):
+            v = piv.iat[i, j]
+            a2.text(j, i, f"{v:.0%}", ha="center", va="center", fontsize=9, color="white" if v > 0.55 else INK)
+    a2.set_xticks(range(piv.shape[1]), [f"±{int(w)}분" for w in piv.columns])
+    a2.set_yticks(range(piv.shape[0]), [f"{s:.0f}분 이상" for s in piv.index])
+    a2.set_xlabel("출발 시각 조정 범위 (W)")
+    a2.set_ylabel("단축 기준 (S)")
+    a2.set_title(f"가정별 회피 가능 비율 ({av['회피가능_비율'].min():.0%} ~ {av['회피가능_비율'].max():.0%})", fontsize=10)
+    fig.suptitle("[평일 출퇴근] 첫 9401을 만석으로 못 탄 사람 중 회피 가능 비율", fontsize=12, y=1.03)
+    _deck_note(fig, "회피 가능 = S분 이상 더 빨리 되는 선택지가 있었던 사람. 정류장 변경 = 같은 방향 다른 정류장으로 버스·도보(길 건너 포함) 이동해 "
+                    "서울을 빠져나가기까지 S분 이상 단축, 시각 조정 = 같은 정류장 ±W분 안 다른 10분의 기대 대기가 S분 이상 짧음. "
+                    "한 사람이 옮긴다고 볼 때의 선택지(많은 사람이 한꺼번에 옮기는 효과는 반영 안 함)")
+    save(fig, "S19cAvoidableFailures", "[장표 회피 논리] 첫 9401을 만석으로 못 탄 사람 중 정류장 변경·출발 시각 조정으로 회피 가능한 비율 (가정 9가지 범위)")
+
+
 def build_deck(r: dict, save) -> None:
     """장표 하늘색 박스 그림 (13~19쪽). 하나가 실패해도 나머지는 그린다."""
     if not r.get("deck"):
         return
-    for fn in (s13_seats, s14_headway, s15_flow, s16_wait_ratio, s17_share, s18_validation, s18_cv, s19_results):
+    for fn in (s13_seats, s14_headway, s15_flow, s16_wait_ratio, s17_share, s18_validation, s18_cv, s19_results, s19_avoidable):
         try:
             fn(r, save)
         except Exception as e:  # noqa: BLE001  안심구역에서 그림 하나 때문에 반출 전체가 멈추지 않게

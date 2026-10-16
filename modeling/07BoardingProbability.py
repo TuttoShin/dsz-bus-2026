@@ -452,6 +452,7 @@ def _slot_table(rows: list) -> pd.DataFrame:
         "wait_next_min": (tot["wn"] / tot["w"]).where(any_w, plain),
         "give_up_share": (tot["wg"] / tot["w"]).where(any_w, 0.0),
         "n_days": g["date"].nunique(),
+        "arrivals_daily": tot["w"] / g["date"].nunique(),  # 그 10분에 오는 사람 (하루 평균, 09번 회피 분석 가중치)
     }).reset_index()
     out["hour"] = out["slot"] * SLOT_MIN // 60
     out["time"] = out["slot"].map(lambda k: f"{k * SLOT_MIN // 60:02d}:{k * SLOT_MIN % 60:02d}")

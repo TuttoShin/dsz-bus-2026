@@ -372,6 +372,16 @@ def _deck_tables(r: dict, label_map: dict) -> dict:
         "예상대기_상위10%_분": _round_to(top["wait_p90_min"], 1),
     }), "[장표19] 요일·시간대별 위험 칸 Top5 (기대 대기가 긴 순): 첫 버스 탑승확률, 만석이라 보내는 버스 수, 사람별 대기 시간 분포", False)
 
+    av = r.get("avoid")
+    if av is not None and len(av):
+        t = av.copy()
+        for c in [c for c in t.columns if "비율" in c]:
+            t[c] = _round_to(t[c], 0.01)
+        for c in [c for c in t.columns if c.endswith("_분")]:
+            t[c] = _round_to(t[c], 1)
+        out["28AvoidableFailures"] = (t, "[평일 출퇴근] 첫 9401을 만석으로 못 탄 사람 중 회피 가능 비율: 단축 기준 S분 x 출발 시각 조정 범위 ±W분 9가지 가정 "
+                                         "(정류장 변경 = 같은 방향 다른 정류장으로 버스·도보·길 건너 이동, 시각 조정 = 같은 정류장 ±W분 안 다른 10분)", False)
+
     out["27DeckNumbers"] = (_deck_numbers(r, label_map), "장표 빈칸(○)에 들어갈 숫자 모음 (모두 위 표·그림과 같은 계산)", False)
     return out
 
@@ -520,6 +530,14 @@ def _deck_numbers(r: dict, label_map: dict) -> pd.DataFrame:
         add(19, "가장 위험한 칸 (기대 대기가 가장 긴 칸)",
             f"{label_map.get(int(w['seq']))} {DOW_KR[w['dow']]} {int(w['hour'])}시, 기대 대기 {w['wait_total_min']:.0f}분, 확률 {pct(w['p_board_mid'])}")
         add(19, "그 칸 최악(상위 10%): 보내는 버스 / 대기", f"{w['missed_buses_p90']:.0f}대 / {w['wait_p90_min']:.0f}분")
+    av = r.get("avoid")
+    if av is not None and len(av):
+        b = av[av["기본가정"]].iloc[0] if av["기본가정"].any() else av.iloc[0]
+        add("회피", "회피 가능한 탑승 실패 비율 (가정 9가지 범위)", f"{av['회피가능_비율'].min():.0%} ~ {av['회피가능_비율'].max():.0%}")
+        add("회피", f"기본 가정 (S={b['단축기준_분(S)']:.0f}분, ±{b['시각조정범위_분(W)']:.0f}분): 회피 가능 / 정류장 변경 / 시각 조정",
+            f"{b['회피가능_비율']:.0%} / {b['정류장변경_가능_비율']:.0%} / {b['시각조정_가능_비율']:.0%}")
+        add("회피", "기본 가정: 정류장 변경 시 단축 / 시각 조정 시 대기 감소 (중앙값)",
+            f"{b['정류장변경_단축_중앙값_분']:.0f}분 / {b['시각조정_대기감소_중앙값_분']:.0f}분")
     return pd.DataFrame(rows, columns=["장표", "항목", "값"]).astype(str)
 
 
