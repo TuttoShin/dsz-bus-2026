@@ -7,9 +7,6 @@
 - 교통카드 이용내역(수도권), 노선 정보, 노선정류장 정보, 정류장 정보 (한국교통안전공단)
 - SKT 시간대별·요일별 유동인구
 
-## 실행
-- 안심구역 밖 리허설: `python RunAll.py --dummy` (가짜 데이터로 전체 실행 -> exportDummy/)
-- 안심구역 안: `data-engineering/teminal.txt` 순서대로 `%run RunAll.py`
 
 ## 구성
 | 파일 | 내용 |
