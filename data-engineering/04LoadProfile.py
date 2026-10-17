@@ -14,6 +14,7 @@
 9401 분담률 (02번 정류장별 전체 노선 승차 집계)
   share_all_stop = 그 정류장에서 9401 승차 / 모든 노선 승차   (기간 전체, 정류장마다 값 하나)
   share_all      = 같은 값을 시간대별로 (비교용)
+  share_weekday  = 시간대별, 평일(공휴일 제외)만 (장표 17쪽 "평일 18시" 그림용)
 07번 수요신호 = 주변 유동인구 x 9401 분담률
 
 정류장 사이 실제 차내 이동 시간(ride_times)은 09번 서비스 추천에 쓴다.
@@ -71,8 +72,8 @@ def build_profile(ev: pd.DataFrame, stops: pd.DataFrame, key: str, seat_capacity
 
 
 # %%
-def route_share(stop_board: pd.DataFrame, stops: pd.DataFrame) -> pd.DataFrame | None:
-    """정류장별 9401 분담률. stop_board = 02번 (stop, hour, is_route, users)."""
+def route_share(stop_board: pd.DataFrame, stops: pd.DataFrame, stop_routes: pd.Series | None = None) -> pd.DataFrame | None:
+    """정류장별 9401 분담률. stop_board = 02번 (stop, hour, is_route, users), stop_routes = 02번 정류장별 노선 수."""
     if stop_board is None or stop_board.empty:
         print("⚠ 정류장별 전체 노선 승차 집계 없음 -> 분담률 빈 값 (07번은 유동인구만 수요신호로)")
         return None
@@ -80,6 +81,13 @@ def route_share(stop_board: pd.DataFrame, stops: pd.DataFrame) -> pd.DataFrame |
     tot = sb.groupby(["stop", "hour"])["users"].sum()
     mine = sb[sb["is_route"]].groupby(["stop", "hour"])["users"].sum().reindex(tot.index, fill_value=0)
     hourly = (mine / tot.where(tot > 0)).rename("share_all").reset_index()
+    if "dow" in sb:
+        w = sb[sb["dow"].isin(WEEKDAY_DOWS)]
+        tot_w = w.groupby(["stop", "hour"])["users"].sum()
+        mine_w = w[w["is_route"]].groupby(["stop", "hour"])["users"].sum().reindex(tot_w.index, fill_value=0)
+        hourly = hourly.merge((mine_w / tot_w.where(tot_w > 0)).rename("share_weekday").reset_index(), on=["stop", "hour"], how="left")
+    else:
+        hourly["share_weekday"] = np.nan
     stop_tot = sb.groupby("stop")["users"].sum()
     stop_mine = sb[sb["is_route"]].groupby("stop")["users"].sum().reindex(stop_tot.index, fill_value=0)
     stop_share = (stop_mine / stop_tot.where(stop_tot > 0)).rename("share_all_stop")
@@ -89,7 +97,40 @@ def route_share(stop_board: pd.DataFrame, stops: pd.DataFrame) -> pd.DataFrame |
     out = grid.merge(hourly.rename(columns={"stop": "sttn_id"}), on=["sttn_id", "hour"], how="left")
     out["share_all_stop"] = out["sttn_id"].map(stop_share)
     out["n_other_route_hours"] = out["sttn_id"].map(n_routes).fillna(0)
-    return out[["seq", "hour", "share_all_stop", "share_all", "n_other_route_hours"]]
+    out["n_routes"] = out["sttn_id"].map(stop_routes) if stop_routes is not None and len(stop_routes) else np.nan
+    return out[["seq", "hour", "share_all_stop", "share_all", "share_weekday", "n_other_route_hours", "n_routes"]]
+
+
+WEEKDAY_DOWS = ["mon", "tue", "wed", "thu", "fri"]
+STATION_KEYS = {"weekday": WEEKDAY_DOWS, "weekend": ["sat", "sun"],
+                **{k: [k] for k in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}}
+
+
+def station_boarding(stop_board: pd.DataFrame, stops: pd.DataFrame) -> pd.DataFrame:
+    """정류장 대기 수요 관측값 = 정류장·시간대 전체 노선 승차 (하루 평균), 평일/주말/요일별.
+
+    stop_board = 02번 (stop, hour, is_route, date, users) + RunAll이 붙인 dow (공휴일 = sun)
+    반환: seq, key(weekday/weekend/mon~sun), hour, station_board,
+          share_dh(그 칸 9401 승차 / 전체 노선 승차, 한 달 합), n_total(그 칸 한 달 전체 노선 승차 = 소수 칸 판단용)
+    """
+    cols = ["seq", "key", "hour", "station_board", "share_dh", "n_total"]
+    if stop_board is None or stop_board.empty or "dow" not in stop_board:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for key, dows in STATION_KEYS.items():
+        s = stop_board[stop_board["dow"].isin(dows)]
+        n = s["date"].nunique()  # 그 요일 날짜 수 (정류장마다가 아니라 전체로: 승차 0인 날도 나눔)
+        if n == 0:
+            continue
+        tot = s.groupby(["stop", "hour"])["users"].sum()
+        mine = s[s["is_route"]].groupby(["stop", "hour"])["users"].sum().reindex(tot.index, fill_value=0)
+        g = pd.DataFrame({"station_board": tot / n, "share_dh": mine / tot.where(tot > 0), "n_total": tot}).reset_index()
+        rows.append(g.assign(key=key))
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    info = stops[["seq", "sttn_id"]].drop_duplicates("seq")
+    out = pd.concat(rows, ignore_index=True).merge(info, left_on="stop", right_on="sttn_id")
+    return out[cols]
 
 
 def ride_times(ev: pd.DataFrame, key: str = "weekday", min_n: int = 3) -> dict:

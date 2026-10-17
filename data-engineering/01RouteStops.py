@@ -15,7 +15,8 @@
 4. 서울 정류장 = 법정동코드가 11로 시작 (서울특별시). 없으면 좌표로 판단
    서울 첫 정류장 ~ 마지막 정류장 = 서울_도심루프, 그 앞 = 성남_상행, 뒤 = 성남_하행
    SKT 유동인구는 서울만 있어서 분석은 서울_도심루프만 한다 (성남 구간은 재차 계산에만 씀)
-5. 방향: 9401은 서울역버스환승센터에서 회차한다. 그 전까지는 서울역 방향(진입), 그 정류장부터는 성남 방향(진출)
+5. 가상 정류장(이름에 "가상", 숫자뿐인 이름, 승하차 태그가 한 번도 없는 곳)은 분석에서 뺀다 (mark_virtual)
+6. 방향: 9401은 서울역버스환승센터에서 회차한다. 그 전까지는 서울역 방향(진입), 그 정류장부터는 성남 방향(진출)
    09번 추천 서비스는 같은 방향 정류장끼리만 비교한다
 
 컬럼 이름은 정의서 그대로 (영어 코드, 또는 "운행일자(OPRAT_DATE)" 같은 한글+영어 표기 둘 다 찾음).
@@ -40,6 +41,7 @@ ROUTE_STOP_COLS = {"date": "OPRAT_DATE", "route_id": "ROUTE_ID", "seq": "STTN_SE
 STOP_COLS = {"date": "OPRAT_DATE", "sttn_id": "STTN_ID", "name": "STTN_NMA", "area": "USE_AREA_CD",
              "ars": "STTN_ARSNO", "x": "STTN_GPS_X_XYZ", "y": "STTN_GPS_Y_XYZ"}
 CHUNK = 1_000_000
+KR = {"OPRAT_DATE": "운행일자", "TCBO_ID": "정산사ID", "ROUTE_ID": "노선ID", "ROUTE_NMA": "노선명칭", "ROUTE_NO": "노선번호", "ROUTE_STTN_CNT": "노선정류장수", "STTN_SEQ": "정류장순번", "STTN_ID": "정류장ID", "STTN_NMA": "정류장명칭", "STTN_X_XYZ": "정류장X좌표", "STTN_Y_XYZ": "정류장Y좌표", "STTN_ARSNO": "정류장ARS번호", "USE_AREA_CD": "법정동코드", "STTN_GPS_X_XYZ": "정류장GPSX좌표", "STTN_GPS_Y_XYZ": "정류장GPSY좌표", "TCBO_CAR_ID": "정산사차량ID", "TRFFC_WAY_CD": "교통수단코드", "TCBO_ROUTE_ID": "정산사노선ID", "GIN_DT": "승차일시", "TCBO_GIN_STTN_ID": "정산사승차정류장ID", "GFF_DT": "하차일시", "TCBO_GFF_STTN_ID": "정산사하차정류장ID", "USER_CNT": "이용자수"}
 SEOUL_AREA_PREFIX = "11"  # 법정동코드 앞 두 자리 (서울특별시)
 
 
@@ -68,7 +70,7 @@ def resolve_columns(cols: list[str], spec: dict, name: str, required: tuple = ()
     """정의서 영어 코드로 실제 컬럼 찾기. "운행일자(OPRAT_DATE)"처럼 붙은 표기도 됨. 반환 {실제 컬럼: 우리 이름}"""
     out = {}
     for key, code in spec.items():
-        hit = next((c for c in cols if c.upper() == code or c.upper().endswith(f"({code})")), None)
+        hit = next((c for c in cols if c.upper() == code or c.upper().endswith(f"({code})") or c.replace(" ", "") == KR.get(code)), None)
         if hit is None and key in required:
             raise KeyError(f"{name}에 {code} 컬럼이 없습니다. 실제 컬럼: {cols}")
         if hit is not None:
@@ -235,6 +237,58 @@ def add_direction(df: pd.DataFrame, turnaround_name: str) -> pd.DataFrame:
                   f"서울 첫 정류장에서 가장 먼 seq{turn} {seoul.loc[d.idxmax(), 'stop_name']}을 회차로 봄 (CONFIG turnaround_name 확인)")
         df.loc[g.index, "direction"] = np.where(g["seq"] < turn, "in", "out")
         df.loc[g.index, "turn_seq"] = turn
+    return df
+
+
+def stop_aliases(stop_file: Path, stops: pd.DataFrame, radius_m: float = 30.0) -> dict:
+    """장표 17쪽 '통합': 정산사업자마다 같은 정류장을 다른 정류장ID로 쓰는 경우를 9401 정류장ID로 합친다.
+
+    정류장 정보에서 9401 정류장과 이름(공백·기호 무시)이 같고 radius_m 안에 있는 다른 ID를 찾는다.
+    (길 건너 반대 방향 정류장은 보통 50m 넘게 떨어져 있어서 섞이지 않게 30m로)
+    반환: {다른 정류장ID: 9401 정류장ID}
+    """
+    base = stops.dropna(subset=["utmk_x"]).drop_duplicates("sttn_id").copy()
+    base["key"] = base["stop_name"].map(_norm_name)
+    st = read_filtered(stop_file, STOP_COLS, "정류장 정보", "name",
+                       lambda s: s.fillna("").map(_norm_name).isin(set(base["key"])), required=("sttn_id", "name"))
+    st["sttn_id"] = norm_id(st["sttn_id"])
+    st = st[~st["sttn_id"].isin(set(base["sttn_id"]))].drop_duplicates("sttn_id", keep="last")
+    if st.empty or "x" not in st or "y" not in st:
+        return {}
+    lat, lon = _lat_lon(st["x"], st["y"])
+    st = st.assign(lat=lat.to_numpy(), lon=lon.to_numpy()).dropna(subset=["lat", "lon"])
+    if st.empty:
+        return {}
+    x, y = _TRANSFORMER.transform(st["lon"].to_numpy(), st["lat"].to_numpy())
+    st = st.assign(utmk_x=x, utmk_y=y, key=st["name"].map(_norm_name))
+    out = {}
+    for r in st.itertuples(index=False):
+        same = base[base["key"] == r.key]
+        if same.empty:
+            continue
+        d = np.hypot(same["utmk_x"] - r.utmk_x, same["utmk_y"] - r.utmk_y)
+        if d.min() <= radius_m:
+            out[r.sttn_id] = same["sttn_id"].iloc[int(np.argmin(d.to_numpy()))]
+    return out
+
+
+VIRTUAL_SEGMENT = "가상정류장"
+
+
+def mark_virtual(stops: pd.DataFrame, events: pd.DataFrame | None = None) -> pd.DataFrame:
+    """가상 정류장(요금·위치 계산용으로 노선에만 있고 사람이 타고 내리지 않는 곳)을 분석에서 뺀다.
+
+    가상 = 이름에 "가상"이 있거나, 이름이 숫자뿐이거나(예: 8502913), 한 달 동안 승하차 태그가 한 번도 없는 정류장
+    버스 재차 계산(03번)에는 그대로 두고, 구간 이름만 "가상정류장"으로 바꿔서 서울 도심 분석·추천·그림에서 빠지게 한다.
+    """
+    df = stops.copy()
+    name = df["stop_name"].astype(str)
+    virtual = name.str.contains("가상") | name.str.fullmatch(r"\s*\d+\s*")
+    if events is not None and len(events):
+        tapped = events.groupby("seq")["arr_observed"].any()
+        virtual |= ~df["seq"].map(tapped).fillna(False).astype(bool)
+    df["is_virtual"] = virtual
+    df.loc[virtual, "segment"] = VIRTUAL_SEGMENT
     return df
 
 
