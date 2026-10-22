@@ -1,9 +1,9 @@
 """
 MakeDummyRaw.py
 
-안심구역 밖에서 RunAll.py를 미리 돌려보기 위한 가짜 데이터. 정의서와 같은 컬럼명으로 만든다.
-결과 숫자는 의미 없고, 파이프라인이 안 깨지고 끝까지 도는지 확인하는 용도.
-다른 파일 없이 혼자 만든다 (반입 직후 data/ 가 비어 있어도 됨).
+실제 데이터 없이 RunAll.py 전체를 점검하기 위한 가짜 데이터. 정의서와 같은 컬럼명으로 만든다.
+결과 숫자는 의미가 없고, 파이프라인이 끝까지 실행되는지 확인하는 용도.
+다른 파일 없이 혼자 생성한다 (data/ 폴더가 비어 있어도 됨).
 
   dummyRoute.csv       노선 정보 (9401 + 다른 지역 같은 번호 9401 + 다른 노선)
   dummyRouteStop.csv   노선정류장 정보 (운행일자 2개 -> 최근 것을 고르는지 확인)
@@ -12,7 +12,7 @@ MakeDummyRaw.py
                        버스가 정류장마다 평균 2.5분씩(들쭉날쭉하게) 걸려 가서 뒤로 갈수록 몰리고,
                        41석이 차면 못 타고 다음 버스를 기다린다 (실제처럼 만차가 생김)
                        순천향대학병원 두 정류장(seq28, seq38)은 같은 정류장ID로 만들어서 구분 로직을 확인
-                       다른 노선 승차도 섞어서 9401 분담률을 계산할 수 있게
+                       다른 노선 승차도 섞어서 9401 점유율을 계산할 수 있게
                        성남 방향 정류장에서 서울역 쪽으로 거꾸로 가는 다른 노선도 넣음 (09번 버스로 옮겨 타기 확인)
                        경기 노선은 세종문화회관·명동.롯데영프라자를 다른 정류장ID(7로 시작, 10m 옆)로 씀 (01번 통합 확인)
   dummyFlowTime.csv    SKT 시간대별 유동인구 (서울 정류장 주변 3x3 셀)
@@ -81,7 +81,7 @@ ALIAS_NAMES = ["세종문화회관", "명동.롯데영프라자"]  # 경기 노�
 def _stop_table() -> pd.DataFrame:
     s = pd.DataFrame(STOPS, columns=["seq", "name", "ars", "lat", "lon", "board_m", "alight_m"])
     s["seg"] = np.select([s["seq"] < 28, s["seq"] > 38], ["out", "in"], "seoul")
-    out = s["seg"] != "seoul"  # 성남 정류장 좌표는 분당 안에 대충 흩뿌림
+    out = s["seg"] != "seoul"  # 성남 정류장 좌표는 분당 안에 임의로 배치
     s.loc[out, "lat"] = 37.34 + (s.loc[out, "seq"] % 23) * 0.003
     s.loc[out, "lon"] = 127.11 + rng.uniform(0, 0.02, out.sum())
     s["sttn_id"] = [f"1{seq:03d}00{i % 7}" for i, seq in enumerate(s["seq"])]
@@ -181,13 +181,13 @@ def make_dummy_card(s: pd.DataFrame, ym: str = "202408") -> None:
         "TRNSC_ID": "1", "TRS_CNT": 0, "TCBO_USER_TYPE_CD": "01", "USER_CNT": 1, "USE_DST": 0, "BRDNG_TM": 0,
         "UMD_CD": "11140",
     })
-    # 다른 노선 승차 (서울 정류장은 많이, 성남은 조금) -> 9401 분담률 계산용
+    # 다른 노선 승차 (서울 정류장은 많이, 성남은 조금) -> 9401 점유율 계산용
     seoul_ids = set(s.loc[s["seg"] == "seoul", "sttn_id"])
     other = card[card["TCBO_GIN_STTN_ID"].isin(seoul_ids) | (rng.random(len(card)) < 0.2)].copy()
     other["TCBO_ROUTE_ID"] = rng.choice(["1100001000", "1100002000", "1100003000"], len(other))
     other["TCBO_CAR_ID"] = "8001"
     # 반대 방향 다른 노선: 성남 방향 정류장(순천향대 등)에서 타서 서울역 쪽으로 거꾸로 가는 버스
-    #   (09번 "순천향대에서 다른 버스로 서울역까지 가서 9401 타기" 확인용). 정류장 하나에 3분
+    #   (09번 다른 버스로 옮겨 타기 점검용). 정류장 하나에 3분
     turn = int(s.index[s["name"] == "서울역버스환승센터"][0])
     out_pos = [i for i in range(turn, len(s)) if s["seg"].iat[i] == "seoul"]
     rev = card[card["TCBO_GIN_STTN_ID"].isin(set(ids[out_pos[1:]]))].sample(frac=0.6, random_state=2).copy()
@@ -200,7 +200,7 @@ def make_dummy_card(s: pd.DataFrame, ym: str = "202408") -> None:
     rev["TCBO_CAR_ID"] = [f"9{k:03d}" for k in rng.integers(1, 40, len(rev))]
     rev["TCBO_GFF_STTN_ID"] = ids[off_pos]
     rev["GFF_DT"] = (t_on + pd.to_timedelta((gin_pos - off_pos) * 3 * 60, unit="s")).dt.strftime("%Y%m%d%H%M%S").to_numpy()
-    # 경기 노선: 같은 정류장을 다른 ID(7...)로 기록 (장표 17쪽 통합 대상)
+    # 경기 노선: 같은 정류장을 다른 ID(7...)로 기록 (01번 정류장ID 통합 대상)
     alias_of = {sid: "7" + sid[1:] for sid in s.loc[s["name"].isin(ALIAS_NAMES), "sttn_id"]}
     gg = card[card["TCBO_GIN_STTN_ID"].isin(alias_of)].sample(frac=0.5, random_state=3).copy()
     gg["TCBO_GIN_STTN_ID"] = gg["TCBO_GIN_STTN_ID"].map(alias_of)

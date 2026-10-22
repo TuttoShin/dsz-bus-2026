@@ -18,6 +18,7 @@
 5. 가상 정류장(이름에 "가상", 숫자뿐인 이름, 승하차 태그가 한 번도 없는 곳)은 분석에서 뺀다 (mark_virtual)
 6. 방향: 9401은 서울역버스환승센터에서 회차한다. 그 전까지는 서울역 방향(진입), 그 정류장부터는 성남 방향(진출)
    09번 추천 서비스는 같은 방향 정류장끼리만 비교한다
+7. 다른 정산사업자가 같은 정류장을 다른 ID로 쓰는 경우 이름·거리로 합친다 (stop_aliases)
 
 컬럼 이름은 정의서 그대로 (영어 코드, 또는 "운행일자(OPRAT_DATE)" 같은 한글+영어 표기 둘 다 찾음).
 주의: 노선정류장 정보의 정류장 이름 컬럼은 정의서상 ROUTE_NO로 되어 있다 (정류장명칭(ROUTE_NO)).
@@ -67,7 +68,7 @@ def _header(path: Path) -> tuple[list[str], str, str]:
 
 
 def resolve_columns(cols: list[str], spec: dict, name: str, required: tuple = ()) -> dict:
-    """정의서 영어 코드로 실제 컬럼 찾기. "운행일자(OPRAT_DATE)"처럼 붙은 표기도 됨. 반환 {실제 컬럼: 우리 이름}"""
+    """정의서 영어 코드로 실제 컬럼 찾기. "운행일자(OPRAT_DATE)"처럼 붙은 표기도 됨. 반환 {실제 컬럼: 내부 이름}"""
     out = {}
     for key, code in spec.items():
         hit = next((c for c in cols if c.upper() == code or c.upper().endswith(f"({code})") or c.replace(" ", "") == KR.get(code)), None)
@@ -241,10 +242,10 @@ def add_direction(df: pd.DataFrame, turnaround_name: str) -> pd.DataFrame:
 
 
 def stop_aliases(stop_file: Path, stops: pd.DataFrame, radius_m: float = 30.0) -> dict:
-    """장표 17쪽 '통합': 정산사업자마다 같은 정류장을 다른 정류장ID로 쓰는 경우를 9401 정류장ID로 합친다.
+    """정산사업자마다 같은 정류장을 다른 정류장ID로 쓰는 경우를 9401 정류장ID로 합친다.
 
-    정류장 정보에서 9401 정류장과 이름(공백·기호 무시)이 같고 radius_m 안에 있는 다른 ID를 찾는다.
-    (길 건너 반대 방향 정류장은 보통 50m 넘게 떨어져 있어서 섞이지 않게 30m로)
+    9401 정류장과 이름(공백·기호 무시)이 같고 radius_m 안에 있는 다른 ID를 같은 정류장으로 본다.
+    길 건너 반대 방향 정류장(보통 50m 이상)이 섞이지 않게 기본 30m.
     반환: {다른 정류장ID: 9401 정류장ID}
     """
     base = stops.dropna(subset=["utmk_x"]).drop_duplicates("sttn_id").copy()

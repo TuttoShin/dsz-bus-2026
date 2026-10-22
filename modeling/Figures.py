@@ -1,14 +1,14 @@
 """
 Figures.py
 
-10번 반출 패키지의 그림을 전부 여기서 만든다. 집계된 값(비율·확률·평균·지수)만 그린다.
-버스별·사람별 원자료는 그림에도 들어가지 않는다 (일별 이용량도 평균=100 지수로).
+10번 결과 패키지의 그림을 만든다. 집계된 값(비율·확률·평균·지수)만 그린다.
+버스별·사람별 원자료는 그림에 넣지 않는다 (일별 이용량도 평균 = 100 지수로).
 
-색 규칙 (한 그림 안에서도, 그림끼리도 같은 뜻 = 같은 색)
-  범주(요일·평일/주말 등) : 정해진 순서의 8색 (색맹 검증 통과 순서), 순서를 바꾸지 않음
+색 규칙 (같은 뜻 = 같은 색)
+  범주(요일·평일/주말 등) : 정해진 순서의 8색 (색각 이상 검증을 통과한 순서)
   크기(재차율·대기 시간 등): 한 가지 색의 밝음 -> 진함
-  탑승가능확률            : 빨강(위험) <- 회색(경계 0.8) -> 파랑(여유)  (F1만 기존 빨강-노랑-초록)
-  격자·축은 옅은 실선, 막대·선은 가늘게, 숫자는 꼭 필요한 곳에만
+  탑승확률                : 빨강(낮음) <- 회색(0.8) -> 파랑(높음)  (F1만 빨강-노랑-초록)
+  기대 대기 시간 등급      : 파랑(여유, 10분 이하) <- 회색(15분) -> 빨강(위험, 20분 초과)
 
 그림 목록 (번호 = 파일 이름)
   E1~E5  탐색(EDA): 교통카드 원자료를 모형 없이 집계한 것
@@ -17,7 +17,7 @@ Figures.py
   F3~F5  검증
   F6, F13~F16    서비스
   F7     실측 버스 몰림
-  S13~S19 장표용 (하늘색 박스): 파일 이름의 숫자 = 장표 쪽 번호
+  S13~S19 요약: 잔여 좌석, 도착 간격, 유동인구, 대기 수요, 9401 점유율, 모델 검증, 위험 칸, 회피 가능성
 """
 
 from __future__ import annotations
@@ -294,7 +294,7 @@ def f0_summary(r: dict, save) -> None:
 def f1_heatmap_by_dow(by_dow: dict, save) -> None:
     import matplotlib.pyplot as plt
     hours = _service_hours(list(by_dow.values()))
-    # F1은 기존 빨강-노랑-초록 (발표용으로 보기 편해서). 다른 확률 그림은 색맹 안전한 빨강-파랑
+    # F1은 빨강-노랑-초록, 다른 확률 그림은 색각 이상에도 구분되는 빨강-파랑
     import matplotlib
     from matplotlib.colors import Normalize
     cmap = matplotlib.colormaps["RdYlGn"].copy()
@@ -758,9 +758,9 @@ def f16_location_map(r: dict, names: dict, save) -> None:
     save(fig, "F16LocationRecommendationMap", "위치 기반 추천 지도: 도심 격자마다 가장 가까운 정류장 대신 추천 정류장으로 가면 줄어드는 시간, 지하철역별 추천 화살표")
 
 
-# ================================================================ S. 장표용 (하늘색 박스, 쪽 번호 = 파일 이름)
-def _deck_note(fig, text: str) -> None:
-    """장표 그림 각주: 눕힌 정류장 이름과 겹치지 않게 먼저 여백을 맞추고 그 아래에."""
+# ================================================================ S. 요약 그림
+def _fig_note(fig, text: str) -> None:
+    """그림 각주: 기울인 정류장 이름과 겹치지 않게 여백을 맞춘 뒤 그 아래에 쓴다."""
     fig.tight_layout()
     fig.text(0.01, 0.0, text, fontsize=7.5, color=MUTED, ha="left", va="top")
 
@@ -784,26 +784,26 @@ def _seoul_axis(ax, r: dict, seqs: list, names: dict, rotate: int = 35) -> None:
         ax.text(x + 0.1, 1.01, "성남 방향 →", transform=tr, ha="left", va="bottom", fontsize=7.5, color=INK2)
 
 
-def _deck_names(r: dict) -> dict:
+def _seoul_names(r: dict) -> dict:
     g = r["geom"]
     return {q: f"{q:02d} {g.at[q, 'stop_label']}" for q in g.index}
 
 
 def s13_seats(r: dict, save) -> None:
-    """13쪽 메인: 정류장 순서 x 도착 시 남은 좌석 (평일 퇴근 피크 / 주말 오후 피크). 보조: 정류장 x 시간대 만석 도착 비율."""
+    """정류장 순서별 도착 시 남은 좌석 (평일 퇴근 피크 / 주말 오후 피크), 정류장 x 시간대 만석 도착 비율."""
     import matplotlib.pyplot as plt
-    deck, seats = r["deck"], r["cfg"].seat_capacity
-    seqs, names = sorted(r["geom"].index), _deck_names(r)
+    rep, seats = r["rep"], r["cfg"].seat_capacity
+    seqs, names = sorted(r["geom"].index), _seoul_names(r)
     bp = r["bus_profile"]
     fig, ax = plt.subplots(figsize=(9, 4.2))
-    for (dt, h, kr), col in zip((("weekday", deck["weekday_pm"], "평일"), ("weekend", deck["weekend_pm"], "주말")),
+    for (dt, h, kr), col in zip((("weekday", rep["weekday_pm"], "평일"), ("weekend", rep["weekend_pm"], "주말")),
                                 (DAY_COLOR["평일"], DAY_COLOR["주말"])):
         d = bp[(bp["daytype"] == dt) & (bp["hour"] == h)].set_index("seq").reindex(seqs)
         x = np.arange(len(seqs))
         ax.fill_between(x, d["seats_left_p25"], d["seats_left_p75"], color=col, alpha=0.12, lw=0)
         ax.plot(x, d["seats_left_mean"], marker="o", color=col, label=f"{kr} {h}시 (평균, 띠 = 버스 25~75%)")
-        if deck["focus"] in seqs:
-            i = seqs.index(deck["focus"])
+        if rep["focus"] in seqs:
+            i = seqs.index(rep["focus"])
             v = d["seats_left_mean"].iloc[i]
             if np.isfinite(v):
                 ax.annotate(f"{v:.1f}석", (i, v), xytext=(8, -9 if dt == "weekday" else 9), textcoords="offset points",
@@ -815,9 +815,9 @@ def s13_seats(r: dict, save) -> None:
     _seoul_axis(ax, r, seqs, names)
     ax.legend(loc="lower left")
     ax.set_title("정류장 순서별 남은 좌석 (평일 vs 주말)", pad=18)
-    _deck_note(fig, "교통카드 개별통행으로 운행 회차를 나눠 정류장 순서대로 (승차 - 하차) 누적 = 도착 시 재차. 남은 좌석 = 41 - 재차. "
+    _fig_note(fig, "교통카드 개별통행으로 운행 회차를 나눠 정류장 순서대로 (승차 - 하차) 누적 = 도착 시 재차. 남은 좌석 = 41 - 재차. "
                "피크 = 말단 정류장 남은 좌석이 가장 적은 시간 (평일 16~20시, 주말 12~20시)")
-    save(fig, "S13aSeatsAlongRoute", "[장표13 메인] 서울 도심 정류장 순서별 버스 도착 시 남은 좌석 (평일 퇴근 피크 vs 주말 오후 피크)")
+    save(fig, "S13aSeatsAlongRoute", "[잔여 좌석] 서울 도심 정류장 순서별 버스 도착 시 남은 좌석 (평일 퇴근 피크 vs 주말 오후 피크)")
 
     # 보조: 만석 도착 비율 히트맵 (평일)
     d = bp[(bp["daytype"] == "weekday") & bp["seq"].isin(seqs) & (bp["trips_per_day"] > 0)]
@@ -838,14 +838,14 @@ def s13_seats(r: dict, save) -> None:
     ax.set_xlabel("시간대")
     fig.colorbar(im, ax=ax, shrink=0.85, label="만석(남은 좌석 1석 이하)으로 도착한 버스 비율")
     ax.set_title("[평일] 정류장 x 시간대 만석 도착 비율")
-    _deck_note(fig, "숫자는 10% 이상인 칸만 표시")
-    save(fig, "S13bFullArrivalHeatmap", "[장표13 보조] 평일 정류장 x 시간대 만석(1석 이하) 도착 버스 비율")
+    _fig_note(fig, "숫자는 10% 이상인 칸만 표시")
+    save(fig, "S13bFullArrivalHeatmap", "[잔여 좌석] 평일 정류장 x 시간대 만석(1석 이하) 도착 버스 비율")
 
 
 def s14_headway(r: dict, save) -> None:
-    """14쪽 그래프1: 정류장 순서별 도착 간격 편차·몰림 비율. 그래프2: 평일 vs 주말 시간대별 운행 횟수·평균 간격."""
+    """정류장 순서별 도착 간격 편차·몰림 비율, 평일 vs 주말 시간대별 운행 횟수·평균 간격."""
     import matplotlib.pyplot as plt
-    seqs, names = sorted(r["geom"].index), _deck_names(r)
+    seqs, names = sorted(r["geom"].index), _seoul_names(r)
     bp = r["bus_profile"]
     bp = bp[bp["seq"].isin(seqs) & (bp["trips_per_day"] > 0)]
     bands = [("평일 출근 7~9시", "weekday", [7, 8, 9], SERIES[0]), ("평일 퇴근 17~19시", "weekday", [17, 18, 19], SERIES[6]),
@@ -870,9 +870,9 @@ def s14_headway(r: dict, save) -> None:
     a2.set_ylim(bottom=0)
     _seoul_axis(a2, r, seqs, names)
     a1.tick_params(labelbottom=False)
-    _deck_note(fig, "도착 시각 = 회차별 그 정류장 첫 승하차 태그. 간격 = 같은 정류장 연속 회차의 도착 시각 차. "
+    _fig_note(fig, "도착 시각 = 회차별 그 정류장 첫 승하차 태그. 간격 = 같은 정류장 연속 회차의 도착 시각 차. "
                "몰림 비율 = 간격이 그 정류장·시간대 평균 간격의 50% 미만인 버스 비율. 시간대 안은 운행 횟수로 가중 평균")
-    save(fig, "S14aHeadwayAlongRoute", "[장표14 그래프1] 정류장 순서별 도착 간격 표준편차·몰림 비율 (평일 출근/퇴근, 주말 낮)")
+    save(fig, "S14aHeadwayAlongRoute", "[도착 간격] 정류장 순서별 도착 간격 표준편차·몰림 비율 (평일 출근/퇴근, 주말 낮)")
 
     g = bp.groupby(["daytype", "hour"])
     hs = pd.DataFrame({"trips": g["trips_per_day"].mean(), "gap": g["gap_mean"].mean(), "sd": g["gap_sd"].mean()}).reset_index()
@@ -895,12 +895,12 @@ def s14_headway(r: dict, save) -> None:
     b2.set_ylabel("실제 도착 간격 (분)")
     b2.set_ylim(bottom=0)
     b2.set_title("시간대별 평균 도착 간격 (띠 = ± 표준편차)")
-    _deck_note(fig, "서울 도심 정류장(가상 정류장 제외) 평균")
-    save(fig, "S14bHourlyServiceByDaytype", "[장표14 그래프2] 평일 vs 주말 시간대별 운행 횟수와 평균 도착 간격(± 표준편차)")
+    _fig_note(fig, "서울 도심 정류장(가상 정류장 제외) 평균")
+    save(fig, "S14bHourlyServiceByDaytype", "[도착 간격] 평일 vs 주말 시간대별 운행 횟수와 평균 도착 간격(± 표준편차)")
 
 
 def s15_flow(r: dict, save) -> None:
-    """15쪽: 반경 민감도 미니 막대, 대표 정류장 요일 지수, 시간대 비중."""
+    """반경 민감도, 대표 정류장 요일 지수, 시간대 비중."""
     import matplotlib.pyplot as plt
     sens, cfg = r["sensitivity"], r["cfg"]
     s = sens[(sens["tau"] == cfg.tau) & (sens["signal_variant"] == cfg.signal) & ~sens["is_reference"]].sort_values("radius_m")
@@ -918,12 +918,12 @@ def s15_flow(r: dict, save) -> None:
         ax.set_ylim(0, 1.35)
         ax.legend(loc="upper center", ncol=2)
         ax.set_title(f"반경별 민감도 (기준 {r['run_params'].get('ref_radius', 150):.0f}m 대비)", fontsize=10)
-        _deck_note(fig, "정류장 x 시간대 탑승가능확률 순위 비교 (평일)")
-        save(fig, "S15aRadiusSensitivity", "[장표15 미니] 반경 100/200m로 바꿨을 때 150m 대비 순위 상관·위험 상위 10칸 일치율")
+        _fig_note(fig, "정류장 x 시간대 탑승가능확률 순위 비교 (평일)")
+        save(fig, "S15aRadiusSensitivity", "[유동인구] 반경 100/200m로 바꿨을 때 150m 대비 순위 상관·위험 상위 10칸 일치율")
 
-    fp, deck = r["flow_pattern"], r["deck"]
-    names = _deck_names(r)
-    picks = [(k, q) for k, q in deck["stops"].items() if q in fp["dow_index"].index]
+    fp, rep = r["flow_pattern"], r["rep"]
+    names = _seoul_names(r)
+    picks = [(k, q) for k, q in rep["stops"].items() if q in fp["dow_index"].index]
     if not picks:
         return
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
@@ -935,8 +935,8 @@ def s15_flow(r: dict, save) -> None:
     ax.set_ylabel("유동인구 지수 (7개 요일 평균 = 100)")
     ax.legend(loc="lower left", fontsize=7.5)
     ax.set_title("대표 정류장 요일별 유동인구 지수")
-    _deck_note(fig, "SKT 요일별 유동인구, 정류장 반경 150m 합산")
-    save(fig, "S15bFlowDowIndex", "[장표15 상단] 대표 정류장 4곳 요일별 유동인구 지수(요일 평균 = 100)")
+    _fig_note(fig, "SKT 요일별 유동인구, 정류장 반경 150m 합산")
+    save(fig, "S15bFlowDowIndex", "[유동인구] 대표 정류장 4곳 요일별 유동인구 지수(요일 평균 = 100)")
 
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
     for i, (kind, q) in enumerate(picks):
@@ -948,23 +948,23 @@ def s15_flow(r: dict, save) -> None:
     ax.set_ylabel("하루 유동인구 중 비중 (%)")
     ax.legend(loc="upper left", fontsize=7.5)
     ax.set_title("대표 정류장 시간대별 유동인구 분포 (점 = 피크)")
-    _deck_note(fig, "SKT 시간대별 유동인구(월 일평균), 정류장 반경 150m 합산")
-    save(fig, "S15cFlowHourShare", "[장표15 하단] 대표 정류장 4곳 시간대별 유동인구 비중(%)")
+    _fig_note(fig, "SKT 시간대별 유동인구(월 일평균), 정류장 반경 150m 합산")
+    save(fig, "S15cFlowHourShare", "[유동인구] 대표 정류장 4곳 시간대별 유동인구 비중(%)")
 
 
 def _wait_ratio(d: pd.DataFrame) -> pd.Series:
-    """정류장 대기 비율 = 정류장 대기 수요(모든 노선) ÷ 그 요일 유동인구 (장표 16쪽)."""
+    """정류장 대기 비율 = 정류장 대기 수요(모든 노선) ÷ 그 요일 유동인구."""
     d = d[d["has_skt"] & (d["flow_day"] > 0)]
     return (d["station_demand_daily"] / d["flow_day"]).groupby([d["seq"], d["hour"]]).first()
 
 
 def s16_wait_ratio(r: dict, save) -> None:
-    """16쪽: 대기 비율(9401 대기 수요 ÷ 유동인구) - 정류장별 평일 18시 vs 토 18시, 말단 정류장 요일 x 시간.
-    그래프2: 만석 칸의 승차 기록 vs 복원 대기 수요."""
+    """정류장 대기 비율: 정류장별 평일 18시 vs 토요일 18시, 말단 정류장 요일 x 시간.
+    만석 칸의 승차 기록 vs 복원 대기 수요도 함께 그린다."""
     import matplotlib.pyplot as plt
-    seqs, names, deck = sorted(r["geom"].index), _deck_names(r), r["deck"]
+    seqs, names, rep = sorted(r["geom"].index), _seoul_names(r), r["rep"]
     sdow, sc = r["scored_by_dow"], r["model_scored"]
-    focus = deck["focus"]
+    focus = rep["focus"]
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.4), gridspec_kw={"width_ratios": [1, 1.25]})
     wd, sat = _wait_ratio(sc), _wait_ratio(sdow["sat"])
     x = np.arange(len(seqs))
@@ -992,9 +992,9 @@ def s16_wait_ratio(r: dict, save) -> None:
     a2.set_xlabel("시간대")
     fig.colorbar(im, ax=a2, shrink=0.85, label="대기 비율 (%)")
     a2.set_title(f"{names.get(focus, focus)} 요일 x 시간대 대기 비율 (%)")
-    _deck_note(fig, "대기 비율 = 정류장 대기 수요(모든 노선, = 9401 대기 수요 ÷ 9401 점유율) ÷ 그 요일 반경 150m 유동인구(시간대별 x 요일 지수). "
+    _fig_note(fig, "대기 비율 = 정류장 대기 수요(모든 노선, = 9401 대기 수요 ÷ 9401 점유율) ÷ 그 요일 반경 150m 유동인구(시간대별 x 요일 지수). "
                "유동인구가 중복 집계를 허용한 추정치라 실제 인원 비율이 아닌 상대 지표")
-    save(fig, "S16aWaitRatio", "[장표16] 정류장 대기 비율(정류장 대기 수요 ÷ 유동인구): 정류장별 평일 vs 토요일 18시, 말단 정류장 요일 x 시간대")
+    save(fig, "S16aWaitRatio", "[정류장 대기 수요] 정류장 대기 비율(정류장 대기 수요 ÷ 유동인구): 정류장별 평일 vs 토요일 18시, 말단 정류장 요일 x 시간대")
 
     d = sc[sc["has_skt"] & ~sc["unconstrained"] & (sc["n_buses"] > 0) & (sc["daily_boarding"] > 0)]
     d = d.assign(ratio=d["latent_daily"] / d["daily_boarding"]).nlargest(8, "unmet_daily").iloc[::-1]
@@ -1009,15 +1009,15 @@ def s16_wait_ratio(r: dict, save) -> None:
         ax.set_xlabel("승차 기록 = 100 기준 지수")
         ax.legend(loc="lower right")
         ax.set_title("[평일] 만석 칸의 승차 기록 vs 복원 대기 수요")
-        _deck_note(fig, "만석 칸 = 버스 도착 시 재차율 60% 초과 또는 거의 만석으로 떠난 버스 5% 이상. "
+        _fig_note(fig, "만석 칸 = 버스 도착 시 재차율 60% 초과 또는 거의 만석으로 떠난 버스 5% 이상. "
                    "복원 = 자리 넉넉 칸으로 학습한 수요 모델(SKT x 9401 점유율)과 교통카드 하한 중 큰 값")
-        save(fig, "S16bObservedVsRestored", "[장표16 그래프2] 평일 만석 칸 상위 8개: 승차 기록(=100) 대비 복원 대기 수요")
+        save(fig, "S16bObservedVsRestored", "[정류장 대기 수요] 평일 만석 칸 상위 8개: 승차 기록(=100) 대비 복원 대기 수요")
 
 
 def s17_share(r: dict, save) -> None:
-    """17쪽: 정류장별 9401 점유율 (18시), 대표 정류장 단계별 수요 축소."""
+    """정류장별 9401 점유율 (평일 18시), 말단 정류장 단계별 수요."""
     import matplotlib.pyplot as plt
-    seqs, names, deck = sorted(r["geom"].index), _deck_names(r), r["deck"]
+    seqs, names, rep = sorted(r["geom"].index), _seoul_names(r), r["rep"]
     sh = r.get("share")
     if sh is not None:
         s18 = sh[sh["hour"] == 18].drop_duplicates("seq").set_index("seq").reindex(seqs)
@@ -1036,10 +1036,10 @@ def s17_share(r: dict, save) -> None:
         _seoul_axis(ax, r, seqs, names)
         ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0))
         ax.set_title("정류장별 9401 점유율 (평일 18시, 위 숫자 = 정차 노선 수)", pad=18)
-        _deck_note(fig, "교통카드 승차 기준, 한 달 평일(공휴일 제외) 18시 합산. 정차 노선 수 = 그 정류장에서 한 달 승차 30명 이상인 노선")
-        save(fig, "S17aRouteShare", "[장표17] 정류장별 평일 18시 전체 노선 승차 중 9401 점유율과 정차 노선 수")
+        _fig_note(fig, "교통카드 승차 기준, 한 달 평일(공휴일 제외) 18시 합산. 정차 노선 수 = 그 정류장에서 한 달 승차 30명 이상인 노선")
+        save(fig, "S17aRouteShare", "[9401 점유율] 정류장별 평일 18시 전체 노선 승차 중 9401 점유율과 정차 노선 수")
 
-    sc, focus = r["model_scored"], deck["focus"]
+    sc, focus = r["model_scored"], rep["focus"]
     f = sc[(sc["seq"] == focus) & (sc["hour"] == 18)]
     if len(f) and f["flow_day"].iloc[0] > 0:
         v = f.iloc[0]
@@ -1059,14 +1059,14 @@ def s17_share(r: dict, save) -> None:
         ax.set_xlabel("유동인구 = 100 기준 (로그 눈금)")
         ax.grid(axis="y", visible=False)
         ax.set_title(f"{names.get(focus, focus)} 평일 18시 단계별 수요")
-        _deck_note(fig, "정류장 대기 수요 = 9401 대기 수요 ÷ 9401 점유율(교통카드 정류장 전체 노선 승차 중 9401). "
+        _fig_note(fig, "정류장 대기 수요 = 9401 대기 수요 ÷ 9401 점유율(교통카드 정류장 전체 노선 승차 중 9401). "
                    "9401 대기 수요 = 자리 넉넉 칸으로 학습한 수요 모델 예측(만석 칸은 교통카드 하한과 비교해 큰 값). "
                    f"참고: 실제 9401 승차(교통카드) = {board:.1f}")
-        save(fig, "S17bDemandFunnel", "[장표17 그래프3] 말단 정류장 평일 18시 단계별 수요 축소 (유동인구 = 100 지수)")
+        save(fig, "S17bDemandFunnel", "[9401 점유율] 말단 정류장 평일 18시 단계별 수요 축소 (유동인구 = 100 지수)")
 
 
 def s18_validation(r: dict, save) -> None:
-    """18쪽: 모델 신뢰성 검증 4가지를 작은 그림 4개로."""
+    """모델 신뢰성 검증 4가지."""
     import matplotlib.pyplot as plt
     val, sg, ds = r.get("validation", {}), r.get("split_by_grade", pd.DataFrame()), r["demand_sens"]
     fig, ax = plt.subplots(1, 4, figsize=(15, 3.6))
@@ -1110,13 +1110,13 @@ def s18_validation(r: dict, save) -> None:
     ax[3].set_ylim(0, max(np.nan_to_num(max(a, b)) * 1.3, 1))
     ax[3].set_title("④ SKT 반영 여부별 위험 칸 수", fontsize=10)
     fig.suptitle("모델 신뢰성 검증 (평일)", fontsize=12, y=1.04)
-    _deck_note(fig, "① WAPE = |예측 수요 - 실제 승차| 합 ÷ 실제 승차 합, 자리 넉넉 칸(실제 승차 = 수요)에서. "
+    _fig_note(fig, "① WAPE = |예측 수요 - 실제 승차| 합 ÷ 실제 승차 합, 자리 넉넉 칸(실제 승차 = 수요)에서. "
                "② 만석 칸 = 그 칸 버스의 30% 이상이 만석으로 떠남. ③ 같은 모델, 줄 서기에 넣는 수요만 ±20%. "
                "위험 = 기대 대기 20분 초과")
-    save(fig, "S18Validation", "[장표18] 모델 신뢰성 검증: ① 재현 오차 ② 시간 분할(1~3주 -> 4주차) ③ 수요 ±20% ④ SKT 기여")
+    save(fig, "S18Validation", "[모델 검증] 재현 오차, 시간 분할(1~21일 -> 22일~), 수요 ±20%, SKT 기여")
 
 
-# 18쪽 S18b: 08번 교차검증 변형을 하나씩 더해가는 순서로 (마지막 = 최종 모델)
+# S18b: 08번 교차검증 변형을 하나씩 더해가는 순서 (마지막 = 최종 모델)
 CV_STEPS = [("no_skt", "SKT 없이\n(정류장 배수 x\n요일·시간 배수)"), ("flow_only", "유동인구 x\n평균 대기 비율"),
             ("stay", "+ 체류 목적 보정\n(정류장·요일·시간 배수,\n최종 모델)")]
 CV_TYPES = [("무작위 5-fold", "아는 정류장의 다른 시간대 맞히기\n(무작위 5-fold)"),
@@ -1124,7 +1124,7 @@ CV_TYPES = [("무작위 5-fold", "아는 정류장의 다른 시간대 맞히기
 
 
 def s18_cv(r: dict, save) -> None:
-    """18쪽: 수요 모델에 SKT·보정을 하나씩 더할 때 교차검증 오차 (F4를 장표용으로)."""
+    """수요 모델에 SKT·체류 목적 보정을 하나씩 더할 때의 교차검증 오차."""
     import matplotlib.pyplot as plt
     cv = r["cv"]
     steps = [(k, lab) for k, lab in CV_STEPS if k in set(cv["signal_variant"])]
@@ -1147,19 +1147,19 @@ def s18_cv(r: dict, save) -> None:
         ax.grid(axis="x", visible=False)
         ax.set_title(title, fontsize=10)
     fig.suptitle("수요 모델 구성별 정류장 대기 수요 교차검증 오차 (요일 전체)", fontsize=12, y=1.03)
-    _deck_note(fig, "정류장 x 요일 x 시간대 중 9401 자리 넉넉 칸(정류장 전체 노선 승차 = 대기 수요)만 사용. 괄호 = SKT 없이 대비 오차 변화(음수 = 개선). "
+    _fig_note(fig, "정류장 x 요일 x 시간대 중 9401 자리 넉넉 칸(정류장 전체 노선 승차 = 대기 수요)만 사용. 괄호 = SKT 없이 대비 오차 변화(음수 = 개선). "
                     "무작위 5-fold = 칸을 5등분해 4개로 학습·1개로 시험, 정류장 제외 = 정류장 하나를 통째로 빼고 학습해 그 정류장을 맞힘")
-    save(fig, "S18bCvByModelStep", "[장표18] 수요 모델 구성(SKT 없이 / 유동인구 x 평균 대기 비율 / +체류 목적 보정)별 정류장 대기 수요 교차검증 오차")
+    save(fig, "S18bCvByModelStep", "[모델 검증] 수요 모델 구성(SKT 없이 / 유동인구 x 평균 대기 비율 / +체류 목적 보정)별 정류장 대기 수요 교차검증 오차")
 
 
 def s19_results(r: dict, save) -> None:
-    """19쪽: ① 정류장 순서별 탑승확률·대기 (평일 18시 / 토요일 최악 시간) ② 말단 정류장 요일 x 시간대 탑승확률."""
+    """정류장 순서별 탑승확률·대기 시간 (평일 18시 / 토요일 대기가 가장 긴 시간), 말단 정류장 요일 x 시간대 기대 대기."""
     import matplotlib.pyplot as plt
-    seqs, names, deck = sorted(r["geom"].index), _deck_names(r), r["deck"]
+    seqs, names, rep = sorted(r["geom"].index), _seoul_names(r), r["rep"]
     sc, sat = r["model_scored"], r["scored_by_dow"]["sat"]
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(9, 6.4), sharex=True)
     x = np.arange(len(seqs))
-    for d, h, lab, col in ((sc, 18, "평일 18시", DAY_COLOR["평일"]), (sat, deck["sat_worst"], f"토요일 {deck['sat_worst']}시", DOW_COLOR["sat"])):
+    for d, h, lab, col in ((sc, 18, "평일 18시", DAY_COLOR["평일"]), (sat, rep["sat_worst"], f"토요일 {rep['sat_worst']}시", DOW_COLOR["sat"])):
         v = d[d["hour"] == h].set_index("seq").reindex(seqs)
         a1.plot(x, v["p_board_mid"], marker="o", color=col, label=lab)
         a1.fill_between(x, v["p_board_low"], v["p_board_high"], color=col, alpha=0.12, lw=0)
@@ -1182,10 +1182,10 @@ def s19_results(r: dict, save) -> None:
         a2.text(-0.4, v, lab, color=col, fontsize=7.5, ha="left", va="bottom")
     a2.legend(loc="upper left", ncol=2, fontsize=7.5)
     _seoul_axis(a2, r, seqs, names)
-    _deck_note(fig, "띠 = 날마다 다른 확률의 하위~상위 25%. 대기 = 정류장 도착부터 실제 탄 버스까지 (줄 서기 계산, 만석 버스를 보낸 시간 포함)")
-    save(fig, "S19aProbabilityAlongRoute", "[장표19 ①] 정류장 순서별 탑승확률·예상 대기 시간 (평일 18시 vs 토요일 최악 시간)")
+    _fig_note(fig, "띠 = 날마다 다른 확률의 하위~상위 25%. 대기 = 정류장 도착부터 실제 탄 버스까지 (줄 서기 계산, 만석 버스를 보낸 시간 포함)")
+    save(fig, "S19aProbabilityAlongRoute", "[위험 칸] 정류장 순서별 탑승확률·예상 대기 시간 (평일 18시 vs 토요일 최악 시간)")
 
-    focus = deck["focus"]
+    focus = rep["focus"]
     hours = _service_hours([r["scored_by_dow"][k] for k in DOW_ORDER])
     piv = pd.DataFrame({DOW_KR[k]: r["scored_by_dow"][k][r["scored_by_dow"][k]["seq"] == focus].set_index("hour")["wait_total_min"].reindex(hours)
                         for k in DOW_ORDER}).T
@@ -1205,9 +1205,9 @@ def s19_results(r: dict, save) -> None:
     cb = fig.colorbar(im, ax=ax, shrink=0.85, label="기대 대기 시간 (분)")
     cb.set_ticks([0, 10, 20] + ([round(vmax)] if vmax > 25 else []))
     ax.set_title(f"{names.get(focus, focus)} 요일 x 시간대 기대 대기 시간 (분)")
-    _deck_note(fig, "기대 대기 = 정류장 도착부터 실제로 탄 버스까지 (만석 버스를 보낸 시간 포함). "
+    _fig_note(fig, "기대 대기 = 정류장 도착부터 실제로 탄 버스까지 (만석 버스를 보낸 시간 포함). "
                     "파랑 = 여유(10분 이하), 회색 = 보통(10~20분), 빨강 = 위험(20분 초과), 빈칸 = 운행 없음")
-    save(fig, "S19bFocusStopDowHour", "[장표19 ②] 말단 정류장 요일 x 시간대 기대 대기 시간 (등급: 10분 이하 여유 / 20분 초과 위험)")
+    save(fig, "S19bFocusStopDowHour", "[위험 칸] 말단 정류장 요일 x 시간대 기대 대기 시간 (등급: 10분 이하 여유 / 20분 초과 위험)")
 
 
 AVOID_COLOR = {"정류장 변경·시각 조정 둘 다": SERIES[0], "정류장 변경만": SERIES[6], "출발 시각 조정만": SERIES[3], "대안 없음": AXIS}
@@ -1251,22 +1251,22 @@ def s19_avoidable(r: dict, save) -> None:
     a2.set_ylabel("단축 기준 (S)")
     a2.set_title(f"가정별 회피 가능 비율 ({av['회피가능_비율'].min():.0%} ~ {av['회피가능_비율'].max():.0%})", fontsize=10)
     fig.suptitle("[평일 출퇴근] 첫 9401을 만석으로 못 탄 사람 중 회피 가능 비율", fontsize=12, y=1.03)
-    _deck_note(fig, "회피 가능 = S분 이상 더 빨리 되는 선택지가 있었던 사람. 정류장 변경 = 같은 방향 다른 정류장으로 버스·도보(길 건너 포함) 이동해 "
+    _fig_note(fig, "회피 가능 = S분 이상 더 빨리 되는 선택지가 있었던 사람. 정류장 변경 = 같은 방향 다른 정류장으로 버스·도보(길 건너 포함) 이동해 "
                     "서울을 빠져나가기까지 S분 이상 단축, 시각 조정 = 같은 정류장 ±W분 안 다른 10분의 기대 대기가 S분 이상 짧음. "
                     "한 사람이 옮긴다고 볼 때의 선택지(많은 사람이 한꺼번에 옮기는 효과는 반영 안 함)")
-    save(fig, "S19cAvoidableFailures", "[장표 회피 논리] 첫 9401을 만석으로 못 탄 사람 중 정류장 변경·출발 시각 조정으로 회피 가능한 비율 (가정 9가지 범위)")
+    save(fig, "S19cAvoidableFailures", "[회피 가능성] 첫 9401을 만석으로 못 탄 사람 중 정류장 변경·출발 시각 조정으로 회피 가능한 비율 (가정 9가지 범위)")
 
 
-def build_deck(r: dict, save) -> None:
-    """장표 하늘색 박스 그림 (13~19쪽). 하나가 실패해도 나머지는 그린다."""
-    if not r.get("deck"):
+def build_summary_figs(r: dict, save) -> None:
+    """요약 그림 (S13~S19). 하나가 실패해도 나머지는 그린다."""
+    if not r.get("rep"):
         return
     for fn in (s13_seats, s14_headway, s15_flow, s16_wait_ratio, s17_share, s18_validation, s18_cv, s19_results, s19_avoidable):
         try:
             fn(r, save)
         except Exception as e:  # noqa: BLE001  안심구역에서 그림 하나 때문에 반출 전체가 멈추지 않게
             import traceback
-            print(f"⚠ 장표 그림 {fn.__name__} 생략: {e}")
+            print(f"⚠ 요약 그림 {fn.__name__} 생략: {e}")
             traceback.print_exc()
 
 
@@ -1314,5 +1314,5 @@ def build_all(r: dict, fig_dir: Path, manifest: list, m09) -> None:
     f14_expected_wait(r, save)
     f15_wait_burden(r, save)
     f16_location_map(r, names, save)
-    # 장표용 (하늘색 박스)
-    build_deck(r, save)
+    # 요약 그림
+    build_summary_figs(r, save)
