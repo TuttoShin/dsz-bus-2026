@@ -1,76 +1,55 @@
 """
 07BoardingProbability.py
 
-정류장x시간대별로 "기다리는 사람이 이번 버스를 탈 수 있을 확률"을 계산한다.
+정류장 x 시간대별 9401 탑승확률과 기대 대기 시간을 계산한다.
 
-왜 필요한가)
-교통카드에는 버스를 탄 사람만 있다. 버스가 꽉 차서 못 탄 사람은 기록이 없다.
-그래서 SKT 유동인구(정류장 주변에 있던 사람 수)로 "원래 타려던 사람 수"를 추정한다.
+교통카드에는 버스를 탄 사람만 남고, 만석이라 못 탄 사람은 남지 않는다.
+그래서 SKT 유동인구로 "원래 타려던 사람 수(대기 수요)"를 복원한 뒤, 실제 버스 기록으로 줄 서기를 재현한다.
 
-1. 수요 복원: 원래 타려던 사람 수 추정 (장표 16·17쪽 체류 목적 보정 -> 탑승 노선 보정)
-   (1) 정류장 대기 수요 (모든 노선)
-       관측값 = 그 정류장·요일·시간대의 전체 노선 승차 인원 (교통카드, 하루 평균)
-       대기 비율 = 정류장 대기 수요 / 반경 150m 유동인구 (그 요일)
-       유동인구에는 보행자·상점 이용객·근무 중인 직장인처럼 버스를 기다리지 않는 사람이 섞여 있어서
-       대기 비율은 정류장·요일·시간대마다 다르다 -> 체류 목적 보정
-   (2) 체류 목적 보정 (포아송 회귀, 로그 선형)
+1. 수요 복원
+   (1) 정류장 대기 수요(모든 노선) 관측값 = 정류장·요일·시간대 전체 노선 승차 (교통카드, 하루 평균)
+       대기 비율 = 정류장 대기 수요 / 반경 내 유동인구. 유동인구에는 버스를 기다리지 않는 사람(보행자,
+       상점 이용객, 근무 중인 직장인 등)이 섞여 있어 대기 비율이 정류장·요일·시간대마다 다르다.
+   (2) 체류 목적 보정 (포아송 회귀)
        log(정류장 대기 수요) = log(유동인구) + 기준 대기 비율 + 정류장 배수 + 요일·시간 배수
-         정류장 배수     : 같은 정류장의 다른 요일·시간대에서 학습
-         요일·시간 배수  : 같은 요일·시간대(예: 화요일 18시)의 다른 정류장에서 학습 (7 x 24 = 168개)
-       학습은 9401이 자리가 넉넉했던 칸만 (만석 도착 칸은 승차 기록이 수요보다 작으니 제외)
-         자리가 넉넉 = 버스 1대당 도착 시 재차가 좌석의 tau(60%) 이하
-                     + 거의 만석으로 떠난 버스가 5% 미만
-       만석 도착 칸의 정류장 대기 수요 = 유동인구 x 기준 대기 비율 x 정류장 배수 x 요일·시간 배수
-         (관측값보다 작으면 관측값. 학습에 없는 요일·시간은 같은 시간 다른 요일 배수의 평균)
-       가정: 시간대별 대기 비율 변화 폭은 정류장끼리 비슷하다 (정류장 배수 x 요일·시간 배수로 곱해지니까)
-   (3) 9401 대기 수요 = 정류장 대기 수요 x 9401 점유율 (장표 17쪽, 정류장 x 요일 x 시간대)
-       점유율 = 그 칸 9401 승차 / 전체 노선 승차 (교통카드 한 달), 예외는 adjusted_share()
-         통합   : 정산사업자마다 다른 정류장ID를 이름·좌표(30m)로 합쳐서 셈 (01번 stop_aliases, 02번)
-         소수 칸: 한 달 전체 노선 승차 10명 미만 -> 같은 정류장·같은 요일 하루 점유율 (0%·100% 같은 극단값 방지)
-         만석 도착 칸: 9401이 좌석에 막혀 점유율이 낮게 관측 -> 같은 정류장·같은 시간대의 좌석 여유 요일 점유율 평균
-       평일/주말 결과는 그 요일들의 점유율 평균
-       자리가 넉넉했던 칸은 실제 9401 승차 인원이 곧 수요
-       만석 도착 칸만 (3)으로 올린다. 버스가 안 다닌 시간대는 자리 문제가 아니라서 올리지 않는다
-   - 못 탄 인원(unmet) = 9401 대기 수요 - 실제 9401 승차 인원
-   - 교통카드 하한: 자리가 남은 채 떠난 버스 바로 다음 버스(앞차도 자리가 남았던 경우)의 승차는
-     "그 사이 온 사람 전부"라서, 그 승차 / 그 사이 시간 = 사람이 오는 속도의 하한.
-     만석 도착 칸에서 복원값이 이보다 작으면 이 값을 쓴다
+         정류장 배수    : 같은 정류장의 다른 요일·시간대에서 학습
+         요일·시간 배수 : 같은 요일·시간대의 다른 정류장에서 학습 (7 x 24개)
+       9401 자리가 넉넉했던 칸만 학습한다 (도착 시 재차 <= 좌석의 tau, 거의 만석으로 떠난 버스 < 5%).
+       만석 도착 칸은 위 식으로 복원한다 (관측값보다 작으면 관측값).
+   (3) 9401 대기 수요 = 정류장 대기 수요 x 9401 점유율 (정류장 x 요일 x 시간대, adjusted_share)
+         소수 칸     : 한 달 전체 노선 승차 10명 미만 -> 같은 정류장·같은 요일 하루 점유율
+         만석 도착 칸: 좌석에 막혀 점유율이 낮게 관측 -> 같은 정류장·시간대의 좌석 여유 요일 평균
+       자리가 넉넉했던 칸은 실제 9401 승차가 곧 수요이고, 만석 도착 칸만 복원값으로 올린다.
+   - 교통카드 하한: 앞뒤 버스 모두 자리가 남은 채 떠났다면 뒤 버스 승차 = 그 사이 온 사람 전부.
+     이 승차 / 간격 = 사람이 오는 속도의 하한. 만석 도착 칸에서 복원값이 이보다 작으면 하한을 쓴다.
 
-2. 줄 서기 계산 (교통카드 버스별 기록, 03번)
-   정류장마다 날마다, 실제로 온 버스를 시간 순서대로 놓고
-       버스 i의 남은 좌석 = 41 - 그 버스의 실제 도착 시 재차
-       사람은 원래 타려던 인원의 속도로 꾸준히 와서 먼저 온 순서대로 줄을 선다
-       버스 i는 줄 앞에서부터 남은 좌석만큼 태우고, 못 탄 사람은 그대로 다음 버스를 기다린다
-       이탈 규칙은 두 가지로 돌려서 비교한다 (RunAll.py --patience)
-         patience_min = None : 이탈 없음. 모두 탈 때까지 기다린다 (기본)
-         patience_min = 120  : 120분을 기다려도 못 탄 사람은 줄에서 빠진다 (자리를 차지하지 않음)
-   -> 사람마다 "도착한 시각"과 "실제로 탄 버스 시각(또는 이탈)"이 나온다
-   대기 시간 = 탄 시각 - 도착 시각 (이탈한 사람은 patience_min, 막차까지 못 탄 사람은 막차 시각까지)
-   못 타고 남은 비율(give_up_share) = 이탈한 사람 + 그날 막차까지 못 탄 사람의 비율
-   사람이 오는 속도: 시간당 수요를 시간대 한가운데(예: 18:30)의 값으로 두고 이웃 시간대와 직선으로 이어서 1분마다 나눔
-     (SKT는 1시간 단위라 시간대 안의 모양은 알 수 없음. 17:59 -> 18:00에 속도가 뚝 바뀌지 않게만 함)
-   결과는 시간대별(표·모델용)과 10분 단위(diag["slots"], 서비스용: "18:20에 도착하면")로 모은다
-   탑승가능확률(p_board_mid) = 처음 온 버스에 탄 사람 비율 (그 정류장·시간대에 도착한 사람 기준, 한 달 평균)
-   p_board_low / high = 날마다 계산한 확률의 하위 25% / 상위 25% (나쁜 날 / 좋은 날)
-   추가 대기시간 = 대기 시간 - 다음 버스까지 기다리는 시간 (만차로 보낸 버스 때문에 더 기다린 시간)
-   버스별 실제 (도착 시각, 남은 좌석)을 그대로 쓰니까 몰림과 만차 연속이 가정 없이 들어간다.
-   비교용 uniform=True: 매 시간 같은 대수가 같은 간격으로, 그 시간 평균 좌석을 갖고 왔다고 치고 계산 (몰림을 무시하면?)
+2. 줄 서기 (03번 버스별 기록)
+   정류장·날짜마다 실제로 온 버스를 순서대로 놓고, 버스마다 남은 좌석(41 - 도착 시 재차)만큼
+   먼저 온 사람부터 태운다. 못 탄 사람은 다음 버스를 기다린다.
+   사람은 1분 단위로 도착한다 (시간당 수요를 각 시간대 가운데 값으로 두고 이웃 시간대와 직선으로 연결).
+   이탈 규칙: patience_min = None (이탈 없음, 기본) 또는 분 단위 값 (그만큼 기다려도 못 타면 줄에서 빠짐)
+   결과
+     p_board_mid       처음 온 버스에 탄 사람 비율 (p_board_low / high = 날마다 계산한 값의 하위·상위 25%)
+     wait_total_min    도착부터 실제로 탄 버스까지 평균 대기 (만석 버스를 보낸 시간 포함)
+     wait_p50/p90_min  사람 기준 대기 시간 중앙값 / 상위 10%
+     missed_buses_*    만석이라 보낸 버스 수
+     give_up_share     이탈하거나 막차까지 못 탄 사람 비율
+     grade             기대 대기 10분 이하 여유 / 20분 이하 보통 / 초과 위험
+   시간대 단위 표와 10분 단위 표(diag["slots"], 서비스용)를 함께 만든다.
+   uniform=True: 버스가 매 시간 같은 간격·평균 좌석으로 왔다고 가정한 비교 계산 (몰림 효과 확인)
 
-수요 모델 변형 (08번 교차검증에서 비교, cfg.signal)
-   no_skt    : SKT 안 씀. 정류장 배수 x 요일·시간 배수만 (비교 기준)
-   flow_only : 유동인구 x 기준 대기 비율 하나 (유동인구를 그대로 대기 수요로 보는 경우)
-   stay      : 유동인구 x 기준 대기 비율 x 정류장 배수 x 요일·시간 배수 = 체류 목적 보정 (기본값)
+수요 모델 변형 (cfg.signal, 08번 교차검증에서 비교)
+   no_skt    : 정류장 배수 x 요일·시간 배수만 (SKT 미사용, 비교 기준)
+   flow_only : 유동인구 x 기준 대기 비율 (유동인구를 그대로 대기 수요로 보는 경우)
+   stay      : 유동인구 x 기준 대기 비율 x 정류장 배수 x 요일·시간 배수 (기본값)
 
-평일 / 주말 / 요일 (daytype)
-   체류 목적 보정 모델은 7개 요일 칸을 한꺼번에 학습한다 (cfg.stay_features, 요일별 06번 features)
-   평일 / 주말 결과는 그 요일들의 요일·시간 배수 평균을 쓴다
-   유동인구는 SKT 시간대별 x (그 요일 유동인구 / 7개 요일 평균)
-   승하차·재차·버스별 기록은 그 날들의 교통카드
+평일 / 주말 / 요일 (cfg.daytype)
+   체류 목적 보정은 7개 요일을 한꺼번에 학습하고(cfg.stay_features), 평일·주말은 해당 요일 배수의 평균을 쓴다.
+   그 요일 유동인구 = SKT 시간대별 x (그 요일 유동인구 / 7개 요일 평균)
 
 한계
-   - 줄 서기는 사람이 고르게 온다고 본다 (같은 시간대 안에서 몰려 오는 건 반영 안 함)
-   - 이탈 없음: 다른 수단으로 가는 사람이 있으면 실제보다 줄이 길게 나올 수 있음
-     이탈 120분: 120분은 가정값. 두 결과를 비교해서 장표에 쓸 쪽을 고른다
+   - 같은 시간대 안에서는 사람이 고르게 온다고 본다
+   - 이탈 없음은 다른 수단으로 떠나는 사람을 반영하지 않아 대기가 길게 나올 수 있고, 이탈 시간은 가정값이다
 """
 
 from __future__ import annotations
@@ -90,15 +69,16 @@ VARIANT_TERMS = {"no_skt": (False, True, True), "flow_only": (True, False, False
 DOW_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAYTYPE_DOWS = {"weekday": DOW_KEYS[:5], "weekend": DOW_KEYS[5:], "all": DOW_KEYS, **{k: [k] for k in DOW_KEYS}}
 SHARE_MIN_USERS = 10  # 점유율 소수 칸: 한 달 전체 노선 승차가 이보다 적으면 같은 요일 하루 점유율로
-STAY_RIDGE = 0.1  # 체류 목적 보정 회귀: 요일·시간 배수가 168개라 칸이 적은 배수가 튀지 않게 눌러줌
+STAY_RIDGE = 0.1  # 체류 목적 보정 회귀 규제 (학습 칸이 적은 배수가 튀지 않게)
 QUEUE_STEP_MIN = 1.0  # 줄 서기 계산에서 사람이 오는 시각 간격(분)
-SLOT_MIN = 10  # 서비스용 결과 단위(분). 버스가 4~5분마다 와서 1분 단위는 칸마다 버스가 0~1대라 불안정
+SLOT_MIN = 10  # 서비스용 결과 단위(분)
 FLOOR_MIN_BUSES = 5  # 교통카드 수요 하한을 쓰려면 필요한 "자리 남기고 떠난 연속 버스" 수
 GRADE_THRESHOLDS = {"여유": 10.0, "보통": 20.0}  # 기대 대기 10분 이하 여유 / 10~20분 보통 / 20분 초과 위험
 FULL_BUS_SHARE_MAX = 0.05  # 거의 만석으로 떠난 버스가 5% 넘으면 "자리가 넉넉"에서 뺌
 DAY_QUANTILES = (0.25, 0.75)  # 날마다 다른 확률의 하위/상위 25% (나쁜 날 / 좋은 날)
 # 사람 한 명 기준 분포 (한 달 동안 그 정류장·시간대에 온 모든 사람): 대기 중앙값·상위 10%, 만석이라 보낸 버스 수
 PERSON_COLS = ["wait_p50_min", "wait_p90_min", "missed_buses_mean", "missed_buses_p90"]
+
 
 @dataclass
 class ModelConfig:
@@ -177,7 +157,7 @@ def stay_cells(stay_features: dict, cfg: ModelConfig) -> pd.DataFrame:
 
 
 def adjusted_share(cells: pd.DataFrame) -> pd.DataFrame:
-    """장표 17쪽 9401 점유율 (정류장 x 요일 x 시간대) + 예외 처리. cells = stay_cells() (share_dh, n_total 필요).
+    """9401 점유율 (정류장 x 요일 x 시간대) + 예외 처리. cells = stay_cells() (share_dh, n_total 필요).
 
     반환: seq, dow, hour, share_adj, share_rule("관측" / "소수 칸" / "만석 도착 칸")
     """
@@ -235,12 +215,12 @@ class StayModel:
         return out
 
     def coef_table(self) -> pd.DataFrame:
-        """기준 대기 비율과 정류장 배수 (반출 05번 표)."""
+        """기준 대기 비율과 정류장 배수 (결과표 05)."""
         rows = [("(기준 대기 비율)", self.base)] + [(f"정류장 배수 seq{q}", v) for q, v in sorted(self.stop_eff.items())]
         return pd.DataFrame(rows, columns=["term", "coef"]).assign(multiplier=lambda d: np.exp(d["coef"]))
 
     def dow_hour_table(self) -> pd.DataFrame:
-        """요일 x 시간대 배수 (반출 05b번 표, 7행 x 24열)."""
+        """요일 x 시간대 배수 (결과표 05b, 7행 x 24열)."""
         return pd.DataFrame({h: [math.exp(self._dh(d, h)) for d in DOW_KEYS] for h in range(24)}, index=DOW_KEYS)
 
 
@@ -254,7 +234,7 @@ def fit_stay_model(cells: pd.DataFrame, variant: str = SIGNAL_DEFAULT) -> StayMo
         raise ValueError("학습 가능한(자리가 넉넉 & 유동인구 있는) 칸이 0개 — CONFIG tau를 올려보세요.")
     stops = sorted(train["seq"].unique()) if use_stop else []
     dhs = sorted(train["dh"].unique()) if use_dh else []
-    # 모든 정류장·요일시간을 다 넣고(기준 수준 없음) ridge로 눌러서, 배수가 평균 1 근처에 모이게 함
+    # 기준 수준 없이 모든 정류장·요일시간을 넣고 규제를 걸어 배수가 평균 1 근처에 모이게 함
     cols = [np.ones(len(train))]
     cols += [(train["seq"] == q).to_numpy(float) for q in stops]
     cols += [(train["dh"] == d).to_numpy(float) for d in dhs]
@@ -452,7 +432,7 @@ def _slot_table(rows: list) -> pd.DataFrame:
         "wait_next_min": (tot["wn"] / tot["w"]).where(any_w, plain),
         "give_up_share": (tot["wg"] / tot["w"]).where(any_w, 0.0),
         "n_days": g["date"].nunique(),
-        "arrivals_daily": tot["w"] / g["date"].nunique(),  # 그 10분에 오는 사람 (하루 평균, 09번 회피 분석 가중치)
+        "arrivals_daily": tot["w"] / g["date"].nunique(),  # 그 10분에 오는 사람 (하루 평균)
     }).reset_index()
     out["hour"] = out["slot"] * SLOT_MIN // 60
     out["time"] = out["slot"].map(lambda k: f"{k * SLOT_MIN // 60:02d}:{k * SLOT_MIN % 60:02d}")
@@ -460,7 +440,7 @@ def _slot_table(rows: list) -> pd.DataFrame:
 
 
 def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """정류장마다 날마다 줄 서기를 돌려서 정류장·시간대로 합친다 (위 2번 설명). 반환: (시간대 표, 10분 단위 표)"""
+    """정류장·날짜마다 줄 서기를 돌려 정류장·시간대로 합친다. 반환: (시간대 표, 10분 단위 표)"""
     df = df.copy()
     if cfg.bus_events is None:
         raise ValueError("bus_events(03번 버스별 기록)가 없습니다.")
@@ -538,7 +518,7 @@ def add_boarding_probability(df: pd.DataFrame, cfg: ModelConfig) -> tuple[pd.Dat
 
 # %%
 def run_model(features: pd.DataFrame, cfg: ModelConfig, model: StayModel | None = None) -> tuple[pd.DataFrame, StayModel, dict]:
-    """1~2단계를 순서대로. model을 넘기면 새로 학습하지 않고 그대로 적용 (주말·요일 = 같은 모델)."""
+    """수요 복원 -> 줄 서기. model을 넘기면 새로 학습하지 않고 그대로 적용한다."""
     df = add_capacity_terms(add_flow_day(features, cfg.daytype), cfg)
     cells = stay_cells(cfg.stay_features, cfg) if cfg.stay_features else None
     if model is None:
@@ -566,7 +546,7 @@ def run_model(features: pd.DataFrame, cfg: ModelConfig, model: StayModel | None 
         "n_train_cells": int(model.n_train),
         "n_constrained_skt_cells": int((~skt["unconstrained"]).sum()),
         "n_lifted_cells": int((skt["unmet_daily"] > 0).sum()),
-        "slots": slots,  # 10분 단위 줄 서기 결과 (09번 서비스·그림용, 반출 표에는 안 들어감)
+        "slots": slots,  # 10분 단위 줄 서기 결과 (09번 서비스·그림용)
         # 만석 칸 중 교통카드 하한이 복원값보다 커서 하한을 쓴 칸 수
         "n_card_floor_used": int(((skt.get("card_floor", np.nan) >= skt["latent_daily"] - 1e-9)
                                   & ~skt["unconstrained"] & (skt["unmet_daily"] > 0)).sum()) if "card_floor" in skt else 0,

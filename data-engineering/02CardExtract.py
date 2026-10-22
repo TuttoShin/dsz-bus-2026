@@ -2,27 +2,24 @@
 """
 02CardExtract.py
 
-교통카드 이용내역(수도권)은 매우 크다. 한 번만 훑으면서 두 가지를 모은다.
-1. 9401 노선ID 후보(01번)의 행 -> 03번 버스별 계산에 씀
-   필요한 컬럼만 읽는다 (가상카드번호·트랜잭션ID는 읽지도 않음)
-2. 9401 정류장에서 승차한 모든 노선의 승차 인원 (정류장 x 시간대 x 9401여부 합계)
-   -> 04번 9401 분담률 = 9401 승차 / 그 정류장 전체 노선 승차
+교통카드 이용내역(수도권)은 매우 커서 한 번만 훑으면서 세 가지를 모은다.
+1. 9401 노선ID 후보(01번)의 행 -> 03번 버스별 계산
+   필요한 컬럼만 읽는다 (가상카드번호·트랜잭션ID는 읽지 않음)
+2. 9401 정류장에서 승차한 모든 노선의 승차 인원 (정류장 x 시간대 x 9401여부 x 날짜)
+   -> 04번 9401 점유율, 정류장 대기 수요
 3. 서울 구간 9401 정류장끼리 오간 모든 노선 기록 (승차 정류장 x 하차 정류장 x 날짜 x 시간대 x 노선 x 차량)
-   -> 04번 "정류장 A에서 다른 버스를 타고 정류장 B로 가는 시간"(차내 시간 + 그 구간 버스 대기)
-   -> 09번 추천 서비스: 지금 정류장보다 덜 붐비는 9401 정류장으로 버스 타고 이동
+   -> 04번 다른 버스로 정류장 A에서 B로 가는 시간 -> 09번 정류장 추천
 
-사람 수는 줄 수가 아니라 이용자수(USER_CNT)의 합으로 센다.
-후보 노선ID가 여러 개면(다른 지역 9401 등) 우리 정류장에서 기록이 가장 많은 것 하나를 고른다.
+사람 수는 행 수가 아니라 이용자수(USER_CNT)의 합으로 센다.
+후보 노선ID가 여러 개면(다른 지역 9401 등) 기록이 가장 많은 것을 고른다.
 
 컬럼 (정의서): OPRAT_DATE, TCBO_ID, TCBO_CAR_ID, TRFFC_WAY_CD, TCBO_ROUTE_ID, GIN_DT, TCBO_GIN_STTN_ID,
                GFF_DT, TCBO_GFF_STTN_ID, USER_CNT
 
-저장해 두고 다시 쓰기 (extract_cached)
-   교통카드 전체를 훑는 데 1시간 넘게 걸려서, 결과를 data/processed/cardCache/ 에 저장한다.
-   다음 실행 때 입력(카드 파일 목록·크기·수정시각, 기준 달, 9401 노선ID 후보, 정류장ID, 통합 ID)이 같으면
-   저장한 것을 읽기만 한다 (몇 초). 하나라도 바뀌면 자동으로 다시 훑는다.
-   강제로 다시 훑으려면 RunAll.py --recard
-   cardCache/ 는 행 단위 자료라 반출 X
+추출 결과 저장 (extract_cached)
+   추출 결과를 data/processed/cardCache/ 에 저장하고, 입력(카드 파일 목록·크기·수정시각, 기준 월,
+   노선ID 후보, 정류장ID, 통합 ID)이 같으면 다음 실행에서 다시 읽는다. 하나라도 바뀌면 다시 추출한다.
+   강제로 다시 추출: RunAll.py --recard. cardCache/ 는 행 단위 자료라 결과 폴더에 넣지 않는다.
 """
 
 from __future__ import annotations
@@ -96,9 +93,9 @@ def extract(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_i
 
     반환 {"card": 9401 행, "route_id": 고른 노선ID, "stop_board": 정류장x시간대x9401여부x날짜 승차 합,
           "pair_trips": 서울 정류장 A->B 이동 집계, "n_rows": 전체 행 수, "days": 날짜 범위}
-    card_ym (예: "202408")을 주면 그 달 운행일자만 쓴다 (SKT와 같은 달로 맞춤)
-    노선ID는 앞자리 0을 떼고 비교한다 (노선 정보와 교통카드의 표기 차이 대비)
-    stop_board는 날짜별로 남긴다 (요일별 정류장 대기 수요·평일 점유율·시간 분할 검증에 씀)
+    card_ym (예: "202408"): 그 달 운행일자만 사용 (SKT와 같은 달)
+    노선ID는 앞자리 0을 떼고 비교 (노선 정보와 교통카드의 표기 차이)
+    stop_board는 날짜별로 남긴다 (요일별 정류장 대기 수요, 평일 점유율, 시간 분할 검증)
     aliases = {다른 정산사업자 정류장ID: 9401 정류장ID} (01번 stop_aliases). 정류장별 승차·정류장 간 이동에 합쳐 센다
     """
     norm = _m01().norm_id
@@ -191,7 +188,7 @@ CACHE_VALUES = ["route_id", "route_ids_merged", "route_counts", "n_rows", "alias
 
 def cache_key(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_ids: set[str] | None,
               card_ym: str | None, aliases: dict | None) -> str:
-    """입력이 같은지 확인하는 지문. 카드 파일은 내용 대신 이름·크기·수정시각으로 (수십 GB를 다시 읽지 않게)."""
+    """입력이 같은지 확인하는 지문. 카드 파일은 내용 대신 이름·크기·수정시각으로 확인."""
     files = [[str(p), p.stat().st_size, int(p.stat().st_mtime)] for p in paths]
     blob = json.dumps({
         "files": files, "card_ym": card_ym, "route_ids": sorted(map(str, route_ids)),
@@ -213,7 +210,7 @@ def _save_cache(ext: dict, cache_dir: Path, key: str) -> None:
         v.to_parquet(cache_dir / f"{name}.parquet", index=False)
         saved.append(name)
     meta = {"key": key, "tables": saved, **{k: ext[k] for k in CACHE_VALUES}}
-    # meta.json을 마지막에 써야 중간에 멈췄을 때 반쪽짜리 저장본을 쓰지 않음
+    # meta.json은 마지막에 저장 (중간에 멈춘 저장본은 쓰지 않도록)
     (cache_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
@@ -230,7 +227,7 @@ def _load_cache(cache_dir: Path, meta: dict) -> dict:
 
 def extract_cached(paths: list[Path], route_ids: list[str], stop_ids: set[str], seoul_ids: set[str] | None,
                    card_ym: str | None, aliases: dict | None, cache_dir: Path, refresh: bool = False) -> dict:
-    """extract()와 같은 결과. 입력이 지난번과 같으면 저장해 둔 것을 읽고, 아니면 다시 훑고 저장한다."""
+    """extract()와 같은 결과. 입력이 지난번과 같으면 저장본을 읽고, 아니면 다시 추출해서 저장한다."""
     key = cache_key(paths, route_ids, stop_ids, seoul_ids, card_ym, aliases)
     meta_path = cache_dir / "meta.json"
     if meta_path.exists() and not refresh:
@@ -238,7 +235,7 @@ def extract_cached(paths: list[Path], route_ids: list[str], stop_ids: set[str], 
         if meta.get("key") == key and all((cache_dir / f"{t}.parquet").exists() for t in meta.get("tables", [])):
             print(f"02 저장본 사용 ({cache_dir.name}/, 교통카드를 다시 훑지 않음. 다시 훑으려면 --recard)")
             return _load_cache(cache_dir, meta)
-        print("02 저장본과 입력이 달라서(카드 파일·기준 달·노선·정류장 변경) 교통카드를 다시 훑음")
+        print("02 저장본과 입력이 달라서(카드 파일·기준 월·노선·정류장 변경) 교통카드를 다시 훑음")
     elif refresh:
         print("--recard: 교통카드를 다시 훑음")
     ext = extract(paths, route_ids, stop_ids, seoul_ids, card_ym, aliases)

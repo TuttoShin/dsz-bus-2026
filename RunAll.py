@@ -1,27 +1,27 @@
 """
 RunAll.py
 
-안심구역 안에서 01 -> 10 을 한 번에 실행한다.
+01 -> 10 단계를 한 번에 실행한다.
 
-  01 노선/노선정류장/정류장 정보 -> 9401 노선ID, 정류장 순서·좌표·서울 여부
-  02 교통카드 이용내역 -> 9401 기록 + 9401 정류장의 전체 노선 승차 집계
-  03 버스 한 대씩 정류장 도착 시각·재차·앞차와의 공백
-  04 정류장x시간대 하루 평균 (평일/주말/요일별) + 9401 분담률
-  05 SKT 유동인구 정류장 반경 합산
-  06 합치기 (서울 도심 구간만)
-  07 수요 복원 + 탑승가능확률 (평일 학습 -> 주말·요일 적용)
+  01 노선·노선정류장·정류장 정보 -> 9401 노선ID, 정류장 순서·좌표·방향
+  02 교통카드 이용내역 -> 9401 승하차 기록, 9401 정류장의 전체 노선 승차
+  03 버스 한 대씩 정류장 도착 시각·재차·앞차와의 간격
+  04 정류장 x 시간대 하루 평균 (평일·주말·요일별), 9401 점유율, 정류장 대기 수요
+  05 SKT 유동인구를 정류장 반경으로 합산
+  06 합치기 (서울 도심 구간)
+  07 수요 복원(체류 목적 보정) + 줄 서기로 탑승확률·기대 대기 시간
   08 검증
-  09 서비스: 기대 대기 시간, 상류 정류장 추천, 대기 시간 부담
-  10 반출 패키지 (export/)
+  09 서비스: 정류장 추천, 위치 기반 추천, 회피 가능성, 대기 시간 부담
+  10 결과 패키지 (export/): 집계표와 그림만
 
-1차 반출이 반려돼서(행 단위 데이터), 모델링과 검증까지 안에서 다 끝내고 결과(export/)만 가지고 나온다.
-안에서 코드를 고칠 기회가 거의 없으니, 비교할 설정(반경, tau, 수요신호 종류)을 미리 다 정해두고 한 번에 돌린다.
+개인 단위·행 단위 자료는 data/processed/ 에만 두고, 결과 폴더에는 집계값만 담는다.
+비교할 설정(반경, tau, 수요 모델 변형)은 한 번 실행으로 모두 계산한다.
 
-[반입] 코드만 (파일 이름에 언더바(_)가 있으면 반입 불가). 데이터는 전부 안심구역 데이터
-[안심구역 밖에서 리허설]  python RunAll.py --dummy   -> 가짜 데이터로 전체 실행 -> exportDummy/
-[안심구역 안에서]         data-engineering/teminal.txt 순서대로
-
-실행 로그(data/processed/run_log.txt)와 data/processed/ 는 행 단위 값이 있어 반출 X
+실행
+  python RunAll.py                  실제 데이터 (CONFIG 경로)
+  python RunAll.py --patience 120   줄 서기 이탈 규칙(120분) 버전 -> exportQuit120/
+  python RunAll.py --dummy          가짜 데이터로 전체 점검 -> exportDummy/
+  python RunAll.py --recard         저장해 둔 교통카드 추출 결과를 쓰지 않고 다시 추출
 """
 
 from __future__ import annotations
@@ -42,43 +42,44 @@ PROCESSED_DIR = ROOT / "data" / "processed"
 RAW_DIR = ROOT / "data" / "raw"
 
 # =====================================================================
-# TODO(안심구역): 실제 파일명으로 교체 (data/raw 기준)
+# 데이터 경로와 분석 설정 (상대 경로는 data/raw 기준)
 # =====================================================================
 CONFIG = {
     "route": "9401",
     # 교통카드 (한국교통안전공단, 안심구역 데이터)
-    "card_file": "/kdata/import_data/TB_KTS_DWTCD_METROPOLITAN/202408/*.csv",  # 수도권 승하차 이용내역. *로 여러 파일 (예: 일자별로 나뉜 경우)
+    "card_file": "/kdata/import_data/TB_KTS_DWTCD_METROPOLITAN/202408/*.csv",  # 수도권 승하차 이용내역 (* = 여러 파일)
     "route_file": "/kdata/import_data/TB_KTS_ROUTE/202408/TB_KTS_ROUTE_20240801.csv",  # 노선 정보
     "route_stop_file": "/kdata/import_data/TB_KTS_ROUTESTTN/202408/TB_KTS_ROUTESTTN_20240801.csv",  # 노선정류장 정보
     "stop_file": "/kdata/import_data/TB_KTS_STTN/202408/TB_KTS_STTN_20240801.csv",  # 정류장 정보
-    "route_id": None,  # 9401 노선ID를 직접 지정할 때만 (보통 None: 노선 정보에서 찾음)
-    "turnaround_name": "서울역버스환승센터",
-    "stop_merge_m": 30.0,  # 장표 17쪽 통합: 9401 정류장과 이름이 같고 이 거리(m) 안이면 다른 정산사업자 ID도 같은 정류장  # 회차 정류장 이름. 이 전 = 서울역 방향(진입), 이후 = 성남 방향(진출)
-    "card_ym": "202408",  # 교통카드에서 쓸 달 (SKT 기준년월과 같게). 파일에 다른 달이 있어도 이 달만 씀
-    "holidays": ["20240815"],  # 교통카드 기간의 평일 공휴일 (2024년 8월 15일 광복절, 목) -> 일요일로 침
+    "route_id": None,  # 9401 노선ID 직접 지정 (None이면 노선 정보에서 찾음)
+    "turnaround_name": "서울역버스환승센터",  # 회차 정류장. 이전 = 서울역 방향, 이후 = 성남 방향
+    "stop_merge_m": 30.0,  # 이름이 같고 이 거리(m) 안이면 다른 정산사업자의 정류장ID도 같은 정류장으로 합침
+    "card_ym": "202408",  # 분석 기준 월 (SKT 기준년월과 같게)
+    "holidays": ["20240815"],  # 기간 중 평일 공휴일 -> 일요일로 처리
     # SKT
     "flow_file": "seoul_flow_time_202408.csv",  # SKT_003 시간대별
-    "wkdy_file": "seoul_flow_wkdy_202408.csv",  # SKT_002 요일별 (체류 목적 보정용)
+    "wkdy_file": "seoul_flow_wkdy_202408.csv",  # SKT_002 요일별
     "std_ym": "202408",  # SKT 기준년월 = 교통카드와 같은 달
-    "radii": [100.0, 150.0, 200.0],  # 정류장 반경(m). 세 개 다 돌려서 비교
-    "ref_radius": 150.0,  # 최종 결과에 쓸 반경
+    "radii": [100.0, 150.0, 200.0],  # 정류장 반경(m). 민감도 비교용
+    "ref_radius": 150.0,  # 최종 결과 반경
     # 모델
     "seat_capacity": 41,
-    "tau": 0.6,  # 버스 1대당 도착 시 재차가 좌석의 60% 이하면 "자리가 넉넉했다"로 봄
-    "patience_min": None,  # 줄 서기 이탈 규칙. None = 이탈 없음. --patience 120 으로 실행하면 120분 이탈 버전
-    "taus": [0.5, 0.6, 0.7],  # 08번에서 비교할 tau
-    "signal": "stay",  # 수요 모델: 유동인구 x 기준 대기 비율 x 정류장 배수 x 요일·시간 배수 (체류 목적 보정)
-    # 09번 서비스 계산용 기준값 (모델 가정이 아니라 안내 계산용 일반값)
+    "tau": 0.6,  # 도착 시 재차가 좌석의 60% 이하면 "자리가 넉넉한 칸"
+    "patience_min": None,  # 줄 서기 이탈 시간(분). None = 이탈 없음
+    "taus": [0.5, 0.6, 0.7],  # 민감도 비교용 tau
+    "signal": "stay",  # 수요 모델 (체류 목적 보정: 유동인구 x 기준 대기 비율 x 정류장 배수 x 요일·시간 배수)
+    # 서비스 계산 기준값 (보행 속도 등 일반값)
     "service": {"walk_speed_kmh": 4.5, "detour": 1.3, "max_walk_m": 500, "max_walk_point_m": 1200, "bus_speed_kmh": 15.0,
                 "min_saving_min": 3.0, "max_ride_back_min": 15.0, "workdays_per_year": 250},
-    # 위치 기반 추천 예시 (정류장이 아닌 곳). 지하철역 대략 좌표 (이름, 위도, 경도)
+    # 위치 기반 추천 예시 지점: 지하철역 (이름, 위도, 경도)
     "service_points": [
         ("을지로입구역", 37.5660, 126.9826), ("시청역", 37.5657, 126.9769), ("서울역", 37.5547, 126.9707),
         ("명동역", 37.5609, 126.9863), ("종각역", 37.5702, 126.9831), ("광화문역", 37.5710, 126.9768),
         ("회현역", 37.5585, 126.9783), ("충무로역", 37.5612, 126.9942),
     ],
-    # 장표 그림용 대표 정류장 (이름에 이 글자가 들어간 서울 정류장, 같은 이름이 둘이면 뒤쪽 = 성남 방향)
-    "deck_stops": {"업무": "세종문화회관", "상업·관광": "명동성당", "환승": "서울역버스환승센터", "말단": "순천향대학병원"},
+    # 입지 유형별 대표 정류장 (이름에 포함된 글자로 찾음. 여러 이름 중 하나만 맞으면 됨, 같은 이름이 둘이면 성남 방향)
+    "rep_stops": {"업무": "세종문화회관", "상업·관광": ["명동성당", "남대문세무서"], "환승": "서울역버스환승센터",
+                   "말단": "순천향대학병원"},
     "export_dir": "export",
 }
 
@@ -96,7 +97,7 @@ DOW_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 class _Tee:
-    """화면에 출력하면서 run_log.txt에도 같이 저장."""
+    """화면 출력을 실행 로그에도 저장."""
     def __init__(self, *streams):
         self.streams = streams
 
@@ -114,17 +115,17 @@ def step(title: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="안심구역 일괄 실행")
-    parser.add_argument("--dummy", action="store_true", help="가짜 데이터로 리허설 (MakeDummyRaw.py가 만듦)")
+    parser = argparse.ArgumentParser(description="9401 탑승가능성 분석 일괄 실행")
+    parser.add_argument("--dummy", action="store_true", help="가짜 데이터로 실행 (MakeDummyRaw.py가 생성)")
     parser.add_argument("--recard", action="store_true",
-                        help="저장해 둔 02 교통카드 추출 결과를 쓰지 않고 다시 훑음 (보통은 입력이 바뀌면 자동으로 다시 훑음)")
+                        help="저장해 둔 교통카드 추출 결과를 쓰지 않고 다시 추출 (입력이 바뀌면 자동으로 다시 추출)")
     parser.add_argument("--patience", type=float, default=None,
-                        help="줄 서기 이탈: 이 분(예: 120)을 기다려도 못 타면 줄에서 빠짐. 안 쓰면 이탈 없음")
+                        help="줄 서기 이탈 시간(분). 이만큼 기다려도 못 타면 줄에서 빠짐. 생략하면 이탈 없음")
     args = parser.parse_args()
     cfg_d = {**CONFIG, **(DUMMY_OVERRIDES if args.dummy else {})}
     if args.patience is not None:
         cfg_d["patience_min"] = args.patience
-    # 이탈 버전은 결과 폴더·로그를 따로 (예: export -> exportQuit120), 두 번 돌려도 덮어쓰지 않게
+    # 이탈 버전은 결과 폴더·로그를 따로 (export -> exportQuit120)
     suffix = "" if cfg_d["patience_min"] is None else f"Quit{int(cfg_d['patience_min'])}"
     cfg_d["export_dir"] = cfg_d["export_dir"] + suffix
 
@@ -152,7 +153,7 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     seats = c["seat_capacity"]
 
     if dummy and not (RAW_DIR / c["card_file"]).exists():
-        step("(리허설) 가짜 데이터 생성")
+        step("가짜 데이터 생성")
         load_module("data-engineering/MakeDummyRaw.py").make_all()
 
     step("01. 9401 노선ID와 정류장 순서 (노선 / 노선정류장 / 정류장 정보)")
@@ -164,11 +165,11 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     stop_all = m01.add_direction(stop_all, c["turnaround_name"])
     m01.summary(stop_all)
 
-    step("02. 교통카드: 9401 기록 + 9401 정류장 전체 노선 승차 (처음 한 번만 전체를 훑음, 오래 걸림)")
+    step("02. 교통카드: 9401 기록 + 9401 정류장 전체 노선 승차")
     seoul_ids = set(stop_all.loc[stop_all["segment"] == "서울_도심루프", "sttn_id"])
     aliases = m01.stop_aliases(RAW_DIR / c["stop_file"], stop_all, c["stop_merge_m"])
     print(f"다른 정산사업자 정류장ID 통합 (이름 같고 {c['stop_merge_m']:.0f}m 안): {len(aliases)}개")
-    # 한 번 훑은 결과는 data/processed/cardCache/ 에 저장해 두고, 입력이 같으면 다음 실행부터 읽기만 함
+    # 추출 결과는 data/processed/cardCache/ 에 저장하고, 입력이 같으면 다음 실행에서 재사용
     cache_dir = PROCESSED_DIR / ("cardCacheDummy" if dummy else "cardCache")
     ext = m02.extract_cached(m02.card_files(c["card_file"]), route_ids, set(stop_all["sttn_id"]), seoul_ids, c["card_ym"],
                              aliases, cache_dir, refresh=recard)
@@ -187,17 +188,17 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     quality.update(q3)
     for k, v in q3.items():
         print(f"  {k}: {v:.1%}" if isinstance(v, float) and "비율" in k else f"  {k}: {v}")
-    print("  (정류장순서_일치도는 1에 가까워야 정류장 연결·운행 나누기가 맞음)")
-    print("  (30초이내_연속도착_비율이 높으면 같은 버스가 두 번 잡힌 것, 재차_41명초과_운행비율이 높으면 입석·큰 차량)")
+    print("  (정류장순서_일치도: 1에 가까울수록 정류장 연결·운행 구분이 정상)")
+    print("  (30초이내_연속도착_비율이 높으면 차량 중복, 재차_41명초과_운행비율이 높으면 입석·대형 차량 혼재)")
     del ext["card"]
-    # 가상 정류장(이름에 '가상', 숫자뿐인 이름, 승하차 태그 없음)은 서울 도심 분석·추천·그림에서 뺌
+    # 가상 정류장(이름에 '가상', 숫자뿐인 이름, 승하차 태그 없음)은 분석에서 제외
     stops = m01.mark_virtual(stops, events)
     virtual = stops.loc[stops["is_virtual"], ["seq", "stop_name"]]
     print(f"가상 정류장 {len(virtual)}개 분석 제외: {dict(zip(virtual['seq'], virtual['stop_name']))}")
     quality["가상정류장_제외"] = ", ".join(f"{q} {n}" for q, n in zip(virtual["seq"], virtual["stop_name"]))
     stops.to_parquet(PROCESSED_DIR / "stopMaster.parquet", index=False)
 
-    step("04. 정류장x시간대 하루 평균 (평일 / 주말 / 요일별) + 9401 분담률 + 정류장 대기 수요(전체 노선 승차)")
+    step("04. 정류장x시간대 하루 평균 (평일 / 주말 / 요일별) + 9401 점유율 + 정류장 대기 수요(전체 노선 승차)")
     profile = {k: m04.build_profile(events, stops, k, seats) for k in ["weekday", "weekend"] + DOW_KEYS}
     stop_board = ext["stop_board"]
     if len(stop_board):  # 날짜 -> 요일 (공휴일 = 일요일)
@@ -210,18 +211,18 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     print(wd[(wd["segment"] == "서울_도심루프") & (wd["hour"] == 18)][
         ["seq", "stop_label", "n_buses", "headway_obs", "gap_cv", "full_bus_share"]].round(2).to_string(index=False))
     if share is not None:
-        print("정류장별 9401 분담률:", share.drop_duplicates("seq").set_index("seq")["share_all_stop"].round(3).to_dict())
+        print("정류장별 9401 점유율:", share.drop_duplicates("seq").set_index("seq")["share_all_stop"].round(3).to_dict())
 
     step("05 + 06. SKT 유동인구 반경별 집계 -> 합치기")
     flow = m05.load_skt(RAW_DIR / c["flow_file"], c["std_ym"])
     wkdy = m05.load_skt(RAW_DIR / c["wkdy_file"], c["std_ym"])
     print(f"SKT 시간대별 셀 {len(flow):,}개, 요일별 셀 {len(wkdy):,}개")
     def build(prof: dict, fp, wp, st: pd.DataFrame, key: str) -> pd.DataFrame:
-        """06번 features + 그 요일 정류장 대기 수요 관측값(station_board)."""
+        """06번 결과 + 그 요일의 정류장 대기 수요 관측값."""
         f = m06.merge_all(prof[key], fp, share, wp)
         return f.merge(st.loc[st["key"] == key, ["seq", "hour", "station_board", "share_dh", "n_total"]], on=["seq", "hour"], how="left")
 
-    features_by_radius, stay_by_radius = {}, {}  # 체류 목적 보정은 요일 7개를 한꺼번에 학습
+    features_by_radius, stay_by_radius = {}, {}  # stay_*: 체류 목적 보정 학습용 요일별 자료
     for radius in c["radii"]:
         fp = m05.build_flow_profile(stops, flow, radius)
         wp = m05.build_weekday_profile(stops, wkdy, radius)
@@ -231,15 +232,15 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
             ref_fp, ref_wp = fp, wp
     features = features_by_radius[c["ref_radius"]]
     features_by_day = {k: build(profile, ref_fp, ref_wp, station, k) for k in profile}
-    flow_pattern = flow_pattern_summary(stops, ref_fp, ref_wp)  # 장표 15쪽 (지수·비중만)
+    flow_pattern = flow_pattern_summary(stops, ref_fp, ref_wp)
     print("유동인구 결합 기준:", {k: v for k, v in flow_pattern.items() if not isinstance(v, pd.DataFrame)})
-    features.to_parquet(PROCESSED_DIR / "features.parquet", index=False)  # 안심구역 안에서만 (반출 X)
+    features.to_parquet(PROCESSED_DIR / "features.parquet", index=False)  # 행 단위 자료 (결과 폴더에 넣지 않음)
 
-    step("07. 수요 복원(체류 목적 보정, 요일 7개 한꺼번에 학습) + 탑승가능확률")
+    step("07. 수요 복원(체류 목적 보정) + 탑승확률·기대 대기 시간")
     cfg = m07.ModelConfig(seat_capacity=seats, tau=c["tau"], signal=c["signal"], daytype="weekday", bus_events=events,
                           patience_min=c["patience_min"], stay_features=stay_by_radius[c["ref_radius"]])
     scored, model, diag = m07.run_model(features, cfg)
-    show = lambda d: {k: v for k, v in d.items() if k != "slots"}  # 10분 단위 표는 화면에 안 찍음
+    show = lambda d: {k: v for k, v in d.items() if k != "slots"}  # 10분 단위 표는 출력 생략
     print("[평일]", show(diag))
     print(m07.worst_cells(scored).round(3).to_string(index=False))
     scored_we, _, diag_we = m07.run_model(features_by_day["weekend"], replace(cfg, daytype="weekend"), model=model)
@@ -247,7 +248,7 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     print(m07.worst_cells(scored_we).round(3).to_string(index=False))
     res_dow = {k: m07.run_model(features_by_day[k], replace(cfg, daytype=k), model=model) for k in DOW_KEYS}
     scored_dow = {k: r[0] for k, r in res_dow.items()}
-    # 10분 단위 줄 서기 결과 (서비스·그림용): "18:20에 도착하면"
+    # 10분 단위 줄 서기 결과 (서비스·그림용)
     slots = {"weekday": diag["slots"], "weekend": diag_we["slots"], **{k: r[2]["slots"] for k, r in res_dow.items()}}
     print("[요일별 최저 탑승확률]", {k: round(float(s.loc[s["has_skt"], "p_board_mid"].min()), 3) for k, s in scored_dow.items()})
 
@@ -268,13 +269,13 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
         m08.measured_headway(events, features, "weekend", COMMUTE_HOURS).assign(daytype="주말"),
     ], ignore_index=True)
     print(headway.round(2).to_string(index=False))
-    # 그림용: 버스가 고르게 왔다고 칠 때 (정류장별 몰림 효과 F11)
+    # 버스가 고른 간격으로 왔다고 가정한 비교 결과 (몰림 효과)
     scored_uniform = m07.run_model(features, replace(cfg, uniform=True), model=model)[0]
-    # 장표 13·14쪽: 정류장·시간대별 남은 좌석, 만석 도착, 도착 간격·몰림 비율
+    # 정류장·시간대별 남은 좌석, 만석 도착, 도착 간격·몰림 비율
     bus_prof = m08.bus_profile(events, seats)
-    # 장표 18쪽 모델 신뢰성 검증 4가지
+
     def make_features(e: pd.DataFrame):
-        """그 기간 버스 기록·정류장 승차만으로 (평일 features, 요일별 features). 시간 분할 검증용."""
+        """주어진 기간의 버스 기록·정류장 승차만으로 (평일 자료, 요일별 자료). 시간 분할 검증용."""
         st = m04.station_boarding(stop_board[stop_board["date"].isin(set(e["date"].astype(str).str[:8]))], stops)
         prof = {k: m04.build_profile(e, stops, k, seats) for k in ["weekday"] + DOW_KEYS}
         return build(prof, ref_fp, ref_wp, st, "weekday"), {k: build(prof, ref_fp, ref_wp, st, k) for k in DOW_KEYS}
@@ -286,14 +287,14 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     print(split_by_grade.round(3).to_string(index=False) if len(split_by_grade) else "")
     print(demand_sens.round(3).to_string(index=False))
 
-    step("09. 서비스: 기대 대기 시간 + 상류 정류장 추천 + 대기 시간 부담 (평일 / 주말 / 요일별)")
+    step("09. 서비스: 정류장 추천, 위치 기반 추천, 대기 시간 부담, 회피 가능성")
     geom = m09.stop_geometry(stops)
     other_bus = m04.other_bus_times(ext["pair_trips"], stops, route_id, c["holidays"])
     print(f"서울 정류장끼리 다른 버스로 이동 가능한 (정류장 쌍 x 시간대): {len(other_bus)}개")
     rec_by_day = {k: m09.recommend(sl, geom, COMMUTE_HOURS, c["service"], m04.ride_times(events, k), other_bus, k)
                   for k, sl in slots.items()}  # 10분 단위
     rec = rec_by_day["weekday"]
-    # 위치 기반: 예시 위치(지하철역) + 도심 격자 (평일 출근·퇴근에서 가장 붐비는 시간)
+    # 위치 기반: 예시 지점(지하철역) + 도심 격자
     pts = m09.points_utmk(c["service_points"])
     rides_wd = m04.ride_times(events, "weekday")
     rec_points = pd.concat([
@@ -301,7 +302,7 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
         m09.recommend_from_points(slots["weekend"], geom, pts, COMMUTE_HOURS, c["service"],
                                   m04.ride_times(events, "weekend")).assign(day="주말"),
     ], ignore_index=True)
-    # 지도(F16)는 평일 출근·퇴근에서 성남 방향 정류장 평균 대기가 가장 긴 10분 하나씩
+    # 지도는 평일 출근·퇴근 각각 성남 방향 평균 대기가 가장 긴 10분 시각대
     sw = slots["weekday"][slots["weekday"]["seq"].isin(geom.index[geom["direction"] == "out"])]
     mean_wait = sw.groupby("slot")["wait_total_min"].mean()
     map_slots = [int(mean_wait[mean_wait.index.map(lambda k: k * m07.SLOT_MIN // 60 in hrs)].idxmax())
@@ -314,15 +315,15 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     print(rec[rec["saving_min"] > 0].round(1).to_string(index=False) if len(rec) else "정류장 추천 없음")
     print("요일별 추천 수:", {k: int((v["saving_min"] > 0).sum()) if len(v) else 0 for k, v in rec_by_day.items()})
     print(burden.round(1).to_string(index=False))
-    # 회피 가능한 탑승 실패: 첫 9401을 만석으로 못 탄 사람 중 정류장 변경·출발 시각 조정으로 더 빨리 탈 수 있었던 비율
+    # 회피 가능한 탑승 실패: 첫 9401을 만석으로 놓친 사람 중 정류장 변경·출발 시각 조정으로 더 빨리 탈 수 있었던 비율
     avoid, avoid_detail = m09.avoidable_failures(slots["weekday"], rec, geom, COMMUTE_HOURS)
     a0 = avoid["회피가능_비율"]
     print(f"회피 가능한 탑승 실패 (평일 출퇴근, 가정 9가지): {a0.min():.0%} ~ {a0.max():.0%}")
     print(avoid.round(3).to_string(index=False))
-    deck = deck_context(geom, c["deck_stops"], bus_prof, scored_dow)
-    print("장표 대표 정류장·시간:", deck)
+    rep = rep_context(geom, c["rep_stops"], bus_prof, scored_dow)
+    print("대표 정류장·시간:", rep)
 
-    step("10. 반출 패키지")
+    step("10. 결과 패키지")
     run_params = {k: c[k] for k in ["card_file", "card_ym", "route_file", "route_stop_file", "stop_file", "holidays",
                                     "flow_file", "wkdy_file", "std_ym", "radii", "ref_radius", "taus", "patience_min"]}
     run_params["route_id_used"] = route_id
@@ -337,10 +338,10 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
             "service_rec_by_day": rec_by_day, "wait_burden_weekend": burden_we,
             "service_points": rec_points, "service_grid": rec_grid, "geom": geom, "map_slots": map_slots,
             "slots": slots,
-            # 장표용
+            # 요약 표·그림용
             "bus_profile": bus_prof, "validation": validation, "split_by_grade": split_by_grade, "demand_sens": demand_sens,
-            "flow_pattern": flow_pattern, "share": share, "deck": deck, "avoid": avoid, "avoid_detail": avoid_detail,
-            # 그림용 (집계해서 그리기만 하고 표로 내보내지 않음)
+            "flow_pattern": flow_pattern, "share": share, "rep": rep, "avoid": avoid, "avoid_detail": avoid_detail,
+            # 그림용 (집계해서 그리기만 하고 표로는 내보내지 않음)
             "events": events, "stops": stops, "od": od, "scored_uniform": scored_uniform, "holidays": c["holidays"],
             "run_params": run_params,
         },
@@ -349,18 +350,19 @@ def run(c: dict, dummy: bool = False, recard: bool = False) -> None:
     )
 
 
-def deck_context(geom: pd.DataFrame, deck_stops: dict, bus_prof: pd.DataFrame, scored_dow: dict) -> dict:
-    """장표 그림·숫자에 공통으로 쓸 대표 정류장과 시간.
+def rep_context(geom: pd.DataFrame, rep_stops: dict, bus_prof: pd.DataFrame, scored_dow: dict) -> dict:
+    """요약 표·그림에 공통으로 쓰는 대표 정류장과 시간.
 
-    stops      : {"업무": seq, ...} 이름에 글자가 들어간 서울 정류장 (같은 이름이 둘이면 뒤쪽 = 성남 방향)
-    focus      : 말단 정류장 (없으면 성남 방향 마지막 정류장). 13·16·17·19쪽 대표
+    stops      : {"업무": seq, ...} 입지 유형별 대표 정류장
+    focus      : 말단 정류장 (없으면 성남 방향 마지막 정류장)
     weekday_pm : 평일 16~20시 중 말단 정류장 도착 시 남은 좌석이 가장 적은 시간
-    weekend_pm : 주말 12~20시 중 말단 정류장 남은 좌석이 가장 적은 시간
-    sat_worst  : 토요일 서울 정류장 평균 기대 대기 시간이 가장 긴 시간 (19쪽)
+    weekend_pm : 주말 12~20시 중 같은 기준
+    sat_worst  : 토요일 서울 정류장 평균 기대 대기 시간이 가장 긴 시간
     """
     found = {}
-    for kind, name in deck_stops.items():
-        hit = [q for q in geom.index if name in str(geom.at[q, "stop_name"])]
+    for kind, name in rep_stops.items():
+        names = [name] if isinstance(name, str) else list(name)
+        hit = [q for q in geom.index if any(n in str(geom.at[q, "stop_name"]) for n in names)]
         if hit:
             found[kind] = int(hit[-1])
     outs = [q for q in geom.index if geom.at[q, "direction"] == "out"]
@@ -380,17 +382,20 @@ def deck_context(geom: pd.DataFrame, deck_stops: dict, bus_prof: pd.DataFrame, s
 
 
 def flow_pattern_summary(stops: pd.DataFrame, fp: pd.DataFrame, wp: pd.DataFrame) -> dict:
-    """장표 15쪽: 정류장-유동인구 결합 기준과 정류장별 유동인구 패턴. 원값 없이 지수·비중만.
+    """정류장-유동인구 결합 기준과 정류장별 유동인구 패턴 (원값 없이 지수·비중만).
 
-    dow_index  : 정류장별 요일 유동인구 / 7개 요일 평균 x 100
-    hour_share : 정류장별 하루 유동인구 중 그 시간 비중
+    nearest_stop_median_m : 정류장 간 최근접 거리 중앙값 (이름이 같은 양방향 쌍 제외)
+    cells_in_radius_median: 반경 안 SKT 셀 수 중앙값
+    max_ratio_18h         : 18시 유동인구의 정류장·요일 간 최대 / 최소
+    dow_index             : 정류장별 요일 유동인구 / 7개 요일 평균 x 100
+    hour_share            : 정류장별 하루 유동인구 중 그 시간 비중
     """
     import numpy as np
     s = stops[(stops["segment"] == "서울_도심루프") & ~stops["is_virtual"].fillna(False).astype(bool)].drop_duplicates("seq")
     xy = s[["utmk_x", "utmk_y"]].to_numpy(float)
     d = np.sqrt(((xy[:, None, :] - xy[None, :, :]) ** 2).sum(axis=2))
     same = s["stop_name"].to_numpy()[:, None] == s["stop_name"].to_numpy()[None, :]
-    d[same] = np.inf  # 같은 이름(양방향 같은 정류장)은 빼고 가장 가까운 다른 정류장
+    d[same] = np.inf  # 이름이 같은 양방향 정류장은 제외
     near = d.min(axis=1)
     dows = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     w = wp[wp["seq"].isin(s["seq"])].set_index("seq")[[f"flow_{k}" for k in dows]]
@@ -398,7 +403,7 @@ def flow_pattern_summary(stops: pd.DataFrame, fp: pd.DataFrame, wp: pd.DataFrame
     dow_index.columns = dows
     f = fp[fp["seq"].isin(s["seq"])].pivot_table(index="seq", columns="hour", values="flow_pop")
     hour_share = f.div(f.sum(axis=1), axis=0)
-    # 같은 18시라도 정류장·요일에 따라 유동인구가 몇 배 차이 나는가 (18시 유동인구 x 요일 지수)
+    # 18시 유동인구 x 요일 지수 -> 정류장·요일 간 최대 차이
     at18 = (f[18].to_frame().values * dow_index.reindex(f.index).to_numpy() / 100).ravel() if 18 in f else np.array([])
     at18 = at18[np.isfinite(at18) & (at18 > 0)]
     cells = fp.drop_duplicates("seq").set_index("seq")["n_cells_matched"].reindex(s["seq"])

@@ -1,4 +1,4 @@
-# 정류장x시간대 하루 평균 승하차·재차·실제 운행 (평일/주말/요일별) + 9401 분담률
+# 정류장x시간대 하루 평균 승하차·재차·실제 운행 (평일/주말/요일별) + 9401 점유율 + 정류장 대기 수요
 """
 04LoadProfile.py
 
@@ -11,13 +11,16 @@
   gap_mean, gap_cv      : 앞차와의 실제 공백 평균, 몰림 정도(공백 표준편차 / 평균)
   full_bus_share        : 떠날 때 거의 만석(좌석 - 1명 이상)이었던 버스 비율
 
-9401 분담률 (02번 정류장별 전체 노선 승차 집계)
+9401 점유율 (02번 정류장별 전체 노선 승차 집계, route_share)
   share_all_stop = 그 정류장에서 9401 승차 / 모든 노선 승차   (기간 전체, 정류장마다 값 하나)
-  share_all      = 같은 값을 시간대별로 (비교용)
-  share_weekday  = 시간대별, 평일(공휴일 제외)만 (장표 17쪽 "평일 18시" 그림용)
-07번 수요신호 = 주변 유동인구 x 9401 분담률
+  share_all      = 같은 값을 시간대별로
+  share_weekday  = 시간대별, 평일(공휴일 제외)만
 
-정류장 사이 실제 차내 이동 시간(ride_times)은 09번 서비스 추천에 쓴다.
+정류장 대기 수요 관측값 (station_boarding)
+  정류장·시간대 전체 노선 승차의 하루 평균 (평일/주말/요일별), 칸별 9401 점유율과 승차 수
+  -> 07번 체류 목적 보정의 학습 대상, 점유율 예외 처리
+
+정류장 사이 실제 차내 이동 시간(ride_times)과 다른 버스 이동 시간(other_bus_times)은 09번 서비스 추천에 쓴다.
 """
 
 from __future__ import annotations
@@ -73,9 +76,9 @@ def build_profile(ev: pd.DataFrame, stops: pd.DataFrame, key: str, seat_capacity
 
 # %%
 def route_share(stop_board: pd.DataFrame, stops: pd.DataFrame, stop_routes: pd.Series | None = None) -> pd.DataFrame | None:
-    """정류장별 9401 분담률. stop_board = 02번 (stop, hour, is_route, users), stop_routes = 02번 정류장별 노선 수."""
+    """정류장별 9401 점유율. stop_board = 02번 (stop, hour, is_route, date, users), stop_routes = 02번 정류장별 노선 수."""
     if stop_board is None or stop_board.empty:
-        print("⚠ 정류장별 전체 노선 승차 집계 없음 -> 분담률 빈 값 (07번은 유동인구만 수요신호로)")
+        print("⚠ 정류장별 전체 노선 승차 집계 없음 -> 9401 점유율 없음")
         return None
     sb = stop_board.copy()
     tot = sb.groupby(["stop", "hour"])["users"].sum()
@@ -119,7 +122,7 @@ def station_boarding(stop_board: pd.DataFrame, stops: pd.DataFrame) -> pd.DataFr
     rows = []
     for key, dows in STATION_KEYS.items():
         s = stop_board[stop_board["dow"].isin(dows)]
-        n = s["date"].nunique()  # 그 요일 날짜 수 (정류장마다가 아니라 전체로: 승차 0인 날도 나눔)
+        n = s["date"].nunique()  # 그 요일 날짜 수 (승차가 0인 날도 포함해서 나눔)
         if n == 0:
             continue
         tot = s.groupby(["stop", "hour"])["users"].sum()
@@ -154,7 +157,7 @@ OTHER_BUS_MAX_WAIT = 15.0  # 다른 버스 기다리는 시간 상한(분)
 
 
 def other_bus_times(pair_trips: pd.DataFrame, stops: pd.DataFrame, route_id: str, holidays: list[str]) -> dict:
-    """서울 정류장 A -> B를 9401이 아닌 다른 버스로 갈 때 (차내 시간, 기다리는 시간). 09번 추천 서비스용.
+    """서울 정류장 A -> B를 9401이 아닌 다른 버스로 갈 때 (차내 시간, 기다리는 시간). 09번 정류장 추천용.
 
     차내 시간   = A에서 타서 B에서 내린 승객들의 실제 이동 시간 평균 (교통카드, 모든 노선)
     기다리는 시간 = 배차/2,  배차 = 60 / (그 구간을 실제로 다닌 버스 대수/시간)

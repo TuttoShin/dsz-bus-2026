@@ -1,17 +1,16 @@
 """
 10ExportResults.py
 
-안심구역에서 가지고 나갈 결과물만 export/ 폴더에 모은다.
-1차 반출 때 features.parquet, scores.parquet이 "행 단위 데이터"라서 반려됨
--> 요약표, 통계량, 모델 성능, 그래프만 만든다.
+데이터안심구역 반출용 결과물을 export/ 폴더에 모은다. 요약표, 통계량, 모델 성능, 그림만 담고
+행 단위 자료(버스별·사람별·정류장x시간대 원자료)는 넣지 않는다.
 
-반출 규칙 (코드에서 자동으로 검사)
+반출 규칙 (코드에서 자동 검사)
 1. 유동인구, 승하차 인원, 카드·차량·정류장ID, 좌표 같은 원본 값은 표에 넣지 않는다 (FORBIDDEN_COLUMNS)
-2. 반올림: 확률은 0.05 단위, 대기시간은 1분 단위, 인원은 10명 단위
-3. 표 하나당 최대 100행 (정류장x시간대 원본 테이블이 실수로 섞이는 것 방지)
-4. 반출 신청서에 붙일 파일 목록(ExportManifest.md)도 자동으로 만든다
+2. 반올림: 확률 0.05, 비율 0.01 또는 0.001, 대기시간 1분, 인원 10명 단위
+3. 표 하나당 최대 100행
+4. 파일 목록(ExportManifest.md)을 함께 만든다
 
-RunAll.py 마지막 단계에서 호출됨 (단독 실행 X)
+RunAll.py 마지막 단계에서 호출한다.
 """
 
 from __future__ import annotations
@@ -238,7 +237,7 @@ def build_tables(r: dict, m09) -> dict[str, tuple[pd.DataFrame, str, bool]]:
     dh.index = [DOW_KR[k] for k in dh.index]
     dh.index.name = "요일"
 
-    def _plain(d: dict) -> dict:  # 버스별 기록(DataFrame) 같은 큰 값은 빼고
+    def _plain(d: dict) -> dict:  # 표·사전 같은 큰 값은 제외
         return {k: v for k, v in d.items() if not isinstance(v, (pd.DataFrame, pd.Series, dict))}
 
     items = _plain({**vars(r["cfg"]), **r["diag"], **r.get("run_params", {})})
@@ -277,8 +276,8 @@ def build_tables(r: dict, m09) -> dict[str, tuple[pd.DataFrame, str, bool]]:
     if r.get("scored_by_dow"):
         tables.update(_dow_tables(r["scored_by_dow"]))
     tables.update(_service_tables(r, m09, label_map))
-    if r.get("deck"):
-        tables.update(_deck_tables(r, label_map))
+    if r.get("rep"):
+        tables.update(_summary_tables(r, label_map))
     return tables
 
 
@@ -288,25 +287,49 @@ def _seoul_real(r: dict) -> list:
     return sorted(r["geom"].index)
 
 
-def _deck_tables(r: dict, label_map: dict) -> dict:
-    """장표 13~19쪽 그래프에 들어가는 숫자 (전부 비율·평균·지수, 인원은 10명 단위)."""
-    deck = r["deck"]
+def _summary_tables(r: dict, label_map: dict) -> dict:
+    """요약 표 (모두 비율·평균·지수, 인원은 10명 단위)."""
+    rep = r["rep"]
     seoul = _seoul_real(r)
     bp = r["bus_profile"]
     bp_s = bp[bp["seq"].isin(seoul)]
     out = {}
 
-    # 13쪽: 정류장 순서별 남은 좌석·만석 도착 (평일 퇴근 피크 / 주말 오후 피크)
+    # 정류장 순서별 남은 좌석·만석 도착 (평일 퇴근 피크 / 주말 오후 피크)
     rows = []
-    for dt, h, kr in (("weekday", deck["weekday_pm"], "평일"), ("weekend", deck["weekend_pm"], "주말")):
+    for dt, h, kr in (("weekday", rep["weekday_pm"], "평일"), ("weekend", rep["weekend_pm"], "주말")):
         d = bp_s[(bp_s["daytype"] == dt) & (bp_s["hour"] == h)].set_index("seq").reindex(seoul)
         rows.append(pd.DataFrame({"구분": f"{kr} {h}시", "정류장": [label_map.get(q, q) for q in seoul],
                                   "도착시_남은좌석_평균": _round_to(d["seats_left_mean"], 0.1),
-                                  "만석도착_비율": _round_to(d["full_arrival_share"], 0.05)}))
+                                  "만석도착_비율": _round_to(d["full_arrival_share"], 0.001)}))
     out["20SeatsAlongRoute"] = (pd.concat(rows, ignore_index=True),
-                                "[장표13] 서울 도심 정류장 순서별 버스 도착 시 남은 좌석 평균·만석(1석 이하) 도착 비율 (평일 퇴근 피크 / 주말 오후 피크)", False)
+                                "[잔여 좌석] 서울 도심 정류장 순서별 버스 도착 시 남은 좌석 평균·만석(1석 이하) 도착 비율 (평일 퇴근 피크 / 주말 오후 피크)", False)
 
-    # 14쪽: 평일 vs 주말 시간대별 운행 횟수·평균 간격·편차·몰림 비율 (서울 도심 정류장 평균)
+    # 잔여 좌석 구간별 도착 비율과 대수 (정류장별 피크 / 말단 정류장 시간대별)
+    def seat_tier(d: pd.DataFrame) -> dict:
+        return {
+            "하루_운행대수": _round_to(d["trips_per_day"], 0.1),
+            "0석_도착_비율": _round_to(d["zero_seat_share"], 0.001),
+            "만석(1석이하)_도착_비율": _round_to(d["full_arrival_share"], 0.001),
+            "잔여2~5석_도착_비율": _round_to(d["seats_2to5_share"], 0.001),
+            "잔여5석이하_도착_비율": _round_to(d["le5_share"], 0.001),
+            "하루_0석_도착_대수": _round_to(d["zero_per_day"], 0.1),
+            "하루_만석_도착_대수": _round_to(d["full_per_day"], 0.1),
+            "연속만석_최대_대수(날평균)": _round_to(d["full_run_mean"], 0.1),
+            "연속만석_최대_대수(상위10%날)": _round_to(d["full_run_p90"], 1),
+        }
+    rows = []
+    for dt, h, kr in (("weekday", rep["weekday_pm"], "평일"), ("weekend", rep["weekend_pm"], "주말")):
+        d = bp_s[(bp_s["daytype"] == dt) & (bp_s["hour"] == h)].set_index("seq").reindex(seoul)
+        rows.append(pd.DataFrame({"구분": f"{kr} {h}시", "정류장": [label_map.get(q, q) for q in seoul], **seat_tier(d)}))
+    out["29SeatTierByStop"] = (pd.concat(rows, ignore_index=True),
+                               "[잔여 좌석] 정류장별 버스 도착 시 잔여 좌석 구간(0석 / 만석 1석 이하 / 2~5석 / 5석 이하) 비율·하루 대수·연속 만석 (평일·주말 피크 시간)", False)
+    f = bp[(bp["seq"] == rep["focus"]) & bp["hour"].between(6, 23)].sort_values(["daytype", "hour"])
+    out["29bSeatTierFocusByHour"] = (pd.DataFrame({
+        "구분": f["daytype"].map(DAYTYPE_KR).to_numpy(), "시간대": f["hour"].to_numpy(), **seat_tier(f)}),
+        f"[잔여 좌석] {label_map.get(rep['focus'])} 시간대별 잔여 좌석 구간 비율·하루 대수·연속 만석 (평일/주말, 6~23시)", False)
+
+    # 평일 vs 주말 시간대별 운행 횟수·평균 간격·편차·몰림 비율 (서울 도심 정류장 평균)
     g = bp_s[bp_s["trips_per_day"] > 0].groupby(["daytype", "hour"])
     hs = pd.DataFrame({
         "정류장당_하루운행횟수": g["trips_per_day"].mean(), "평균도착간격_분": g["gap_mean"].mean(),
@@ -318,21 +341,21 @@ def _deck_tables(r: dict, label_map: dict) -> dict:
         hs[c] = _round_to(hs[c], step)
     hs["daytype"] = hs["daytype"].map(DAYTYPE_KR)
     out["21HourlyServiceByDaytype"] = (hs.rename(columns={"daytype": "구분", "hour": "시간대"}),
-                                       "[장표14] 평일 vs 주말 시간대별 운행 횟수·실제 도착 간격 평균·편차·몰림 비율 (서울 도심 정류장 평균)", False)
+                                       "[도착 간격] 평일 vs 주말 시간대별 운행 횟수·실제 도착 간격 평균·편차·몰림 비율 (서울 도심 정류장 평균)", False)
 
-    # 15쪽: 대표 정류장 요일 지수 / 시간대 비중 (원값 없음)
+    # 정류장별 요일 지수 / 시간대 비중 (원값 없음)
     fpat = r["flow_pattern"]
     di = fpat["dow_index"].reindex(seoul)
     di.index = [label_map.get(q, q) for q in di.index]
     di.columns = [DOW_KR[k] for k in di.columns]
     out["22FlowDowIndex"] = (di.apply(lambda c: _round_to(c, 1)).rename_axis("정류장").reset_index(),
-                             "[장표15] 정류장별 요일 유동인구 지수 (7개 요일 평균 = 100, SKT 반경 150m)", False)
+                             "[유동인구] 정류장별 요일 유동인구 지수 (7개 요일 평균 = 100, SKT 반경 150m)", False)
     hsh = fpat["hour_share"].reindex(seoul).T * 100
     hsh.columns = [label_map.get(q, q) for q in hsh.columns]
     out["23FlowHourShare"] = (hsh.apply(lambda c: _round_to(c, 0.1)).rename_axis("시간대").reset_index(),
-                              "[장표15] 정류장별 하루 유동인구 중 시간대 비중(%) (SKT 반경 150m)", False)
+                              "[유동인구] 정류장별 하루 유동인구 중 시간대 비중(%) (SKT 반경 150m)", False)
 
-    # 17쪽: 정류장별 9401 점유율 (18시 / 하루 전체), 정차 노선 수
+    # 정류장별 9401 점유율, 정차 노선 수
     sh = r.get("share")
     if sh is not None:
         s18 = sh[sh["hour"] == 18].drop_duplicates("seq").set_index("seq").reindex(seoul)
@@ -342,24 +365,24 @@ def _deck_tables(r: dict, label_map: dict) -> dict:
             "9401점유율_18시(모든요일)": _round_to(s18["share_all"], 0.01),
             "9401점유율_하루전체": _round_to(s18["share_all_stop"], 0.01),
             "정차노선수(한달승차30명이상)": s18["n_routes"].to_numpy(),
-        }), "[장표17] 정류장별 전체 노선 승차 중 9401 비율(평일 18시 / 모든 요일 18시 / 한 달 전체)과 정차 노선 수", False)
+        }), "[9401 점유율] 정류장별 전체 노선 승차 중 9401 비율(평일 18시 / 모든 요일 18시 / 한 달 전체)과 정차 노선 수", False)
 
-    # 18쪽: 모델 신뢰성 검증
+    # 모델 신뢰성 검증
     val = r.get("validation", {})
     vt = pd.DataFrame([(k, round(v, 3) if isinstance(v, float) else v) for k, v in val.items()], columns=["항목", "값"]).astype(str)
-    out["25ValidationSummary"] = (vt, "[장표18] 모델 신뢰성 검증: ① 재현 오차 ② 시간 분할(1~3주 -> 4주차) ④ SKT 기여", False)
+    out["25ValidationSummary"] = (vt, "[모델 검증] 재현 오차, 시간 분할(1~21일 -> 22일~), SKT 기여", False)
     if len(r.get("split_by_grade", [])):
         sg = r["split_by_grade"].copy()
         for c in sg.columns[2:]:
             sg[c] = _round_to(sg[c], 0.01)
         out["25bTimeSplitByGrade"] = (sg.rename(columns={"grade": "1~3주_등급"}),
-                                      "[장표18] 1~3주로 매긴 등급별 4주차 실제 만석 칸 비율 (등급이 나쁠수록 높아야 함)", False)
+                                      "[모델 검증] 1~21일로 매긴 등급별 22일 이후 실제 만석 칸 비율 (등급이 나쁠수록 높아야 함)", False)
     ds = r["demand_sens"].copy()
     for c in ds.columns[1:]:
         ds[c] = _round_to(ds[c], 0.01 if "확률" in c or "겹침" in c else 1)
-    out["25cDemandSensitivity"] = (ds, "[장표18] ③ 복원 수요 ±20%: 위험 칸 수·평균 확률·대기·위험 top10 겹침", False)
+    out["25cDemandSensitivity"] = (ds, "[모델 검증] 복원 수요 ±20%: 위험 칸 수·평균 확률·대기·위험 top10 겹침", False)
 
-    # 19쪽: 위험 칸 Top5 (요일·시간대)
+    # 위험 칸 Top5 (요일·시간대)
     top = _risk_rank(r["scored_by_dow"], seoul).head(5)
     out["26RiskTop5"] = (pd.DataFrame({
         "정류장": top["seq"].map(label_map).to_numpy(),
@@ -370,7 +393,7 @@ def _deck_tables(r: dict, label_map: dict) -> dict:
         "예상대기_평균_분": _round_to(top["wait_total_min"], 1),
         "예상대기_중앙값_분": _round_to(top["wait_p50_min"], 1),
         "예상대기_상위10%_분": _round_to(top["wait_p90_min"], 1),
-    }), "[장표19] 요일·시간대별 위험 칸 Top5 (기대 대기가 긴 순): 첫 버스 탑승확률, 만석이라 보내는 버스 수, 사람별 대기 시간 분포", False)
+    }), "[위험 칸] 요일·시간대별 위험 칸 Top5 (기대 대기가 긴 순): 첫 버스 탑승확률, 만석이라 보내는 버스 수, 사람별 대기 시간 분포", False)
 
     av = r.get("avoid")
     if av is not None and len(av):
@@ -382,7 +405,7 @@ def _deck_tables(r: dict, label_map: dict) -> dict:
         out["28AvoidableFailures"] = (t, "[평일 출퇴근] 첫 9401을 만석으로 못 탄 사람 중 회피 가능 비율: 단축 기준 S분 x 출발 시각 조정 범위 ±W분 9가지 가정 "
                                          "(정류장 변경 = 같은 방향 다른 정류장으로 버스·도보·길 건너 이동, 시각 조정 = 같은 정류장 ±W분 안 다른 10분)", False)
 
-    out["27DeckNumbers"] = (_deck_numbers(r, label_map), "장표 빈칸(○)에 들어갈 숫자 모음 (모두 위 표·그림과 같은 계산)", False)
+    out["27KeyNumbers"] = (_key_numbers(r, label_map), "주요 수치 요약 (모두 다른 표·그림과 같은 계산)", False)
     return out
 
 
@@ -395,58 +418,68 @@ def _risk_rank(scored_by_dow: dict, seoul: list) -> pd.DataFrame:
     return allc.sort_values(["wait_total_min", "p_board_mid"], ascending=[False, True])
 
 
-def _deck_numbers(r: dict, label_map: dict) -> pd.DataFrame:
-    deck, seoul = r["deck"], _seoul_real(r)
-    focus = deck["focus"]
+def _key_numbers(r: dict, label_map: dict) -> pd.DataFrame:
+    """주요 수치 요약 (구분, 항목, 값). 모두 다른 결과표·그림과 같은 계산."""
+    rep, seoul = r["rep"], _seoul_real(r)
+    focus = rep["focus"]
     fl = label_map.get(focus, str(focus))
     bp = r["bus_profile"].set_index(["daytype", "seq", "hour"])
-    hw, hwe = deck["weekday_pm"], deck["weekend_pm"]
+    hw, hwe = rep["weekday_pm"], rep["weekend_pm"]
     rows = []
 
-    def add(page, item, value):
-        rows.append((page, item, value))
+    def add(topic, item, value):
+        rows.append((topic, item, value))
 
     def pct(x):
         return f"{x:.0%}" if np.isfinite(x) else "-"
 
-    # 13
+    # 잔여 좌석
     for dt, h, kr in (("weekday", hw, "평일"), ("weekend", hwe, "주말")):
         if (dt, focus, h) in bp.index:
             v = bp.loc[(dt, focus, h)]
-            add(13, f"{kr} {h}시 {fl} 도착 시 남은 좌석 평균", f"{v['seats_left_mean']:.1f}석")
-            add(13, f"{kr} {h}시 {fl} 만석(1석 이하) 도착 비율", pct(v["full_arrival_share"]))
-    # 14
+            add("잔여 좌석", f"{kr} {h}시 {fl} 도착 시 남은 좌석 평균", f"{v['seats_left_mean']:.1f}석")
+            add("잔여 좌석", f"{kr} {h}시 {fl} 만석(1석 이하) 도착 비율", pct(v["full_arrival_share"]))
+    for dt, h, kr in (("weekday", hw, "평일"), ("weekend", hwe, "주말")):
+        if (dt, focus, h) in bp.index:
+            v = bp.loc[(dt, focus, h)]
+            add("잔여 좌석", f"{kr} {h}시 {fl}: 하루 0석 도착 / 만석(1석 이하) 도착 / 운행 대수",
+                f"{v['zero_per_day']:.1f}대 / {v['full_per_day']:.1f}대 / {v['trips_per_day']:.1f}대")
+            add("잔여 좌석", f"{kr} {h}시 {fl}: 잔여 5석 이하 도착 비율 (= 만석 + 2~5석)",
+                f"{v['le5_share']:.1%} (= {v['full_arrival_share']:.1%} + {v['seats_2to5_share']:.1%})")
+            add("잔여 좌석", f"{kr} {h}시 {fl}: 만석 버스가 연달아 온 최대 대수 (날 평균 / 상위 10% 날)",
+                f"{v['full_run_mean']:.1f}대 / {v['full_run_p90']:.0f}대")
+    # 도착 간격
     b = r["bus_profile"]
     b = b[b["seq"].isin(seoul) & (b["trips_per_day"] > 0)]
     wd = b[(b["daytype"] == "weekday") & (b["hour"] == hw)]
-    add(14, f"평일 {hw}시 서울 도심 정류장 평균 도착 간격", f"{wd['gap_mean'].mean():.1f}분")
-    add(14, f"평일 {hw}시 도착 간격 표준편차", f"{wd['gap_sd'].mean():.1f}분")
-    add(14, f"평일 {hw}시 몰림 비율(평균 간격 50% 미만)", pct(wd["bunch_share"].mean()))
+    add("도착 간격", f"평일 {hw}시 서울 도심 정류장 평균 도착 간격", f"{wd['gap_mean'].mean():.1f}분")
+    add("도착 간격", f"평일 {hw}시 도착 간격 표준편차", f"{wd['gap_sd'].mean():.1f}분")
+    add("도착 간격", f"평일 {hw}시 몰림 비율(평균 간격 50% 미만)", pct(wd["bunch_share"].mean()))
     we = b[(b["daytype"] == "weekend") & b["hour"].between(12, 20)].groupby("hour")["gap_mean"].mean()
     if len(we):
-        add(14, "주말 오후(12~20시) 평균 도착 간격 최대", f"{we.max():.1f}분 ({int(we.idxmax())}시)")
-    # 15
+        add("도착 간격", "주말 오후(12~20시) 평균 도착 간격 최대", f"{we.max():.1f}분 ({int(we.idxmax())}시)")
+    # 유동인구
     fpat = r["flow_pattern"]
-    add(15, "서울 도심 정류장 간 최근접 거리 중앙값", f"{fpat['nearest_stop_median_m']:.0f}m")
-    add(15, "반경 150m 안 유동인구 셀 수 중앙값", f"{fpat['cells_in_radius_median']:.0f}개")
+    add("유동인구", "서울 도심 정류장 간 최근접 거리 중앙값", f"{fpat['nearest_stop_median_m']:.0f}m")
+    add("유동인구", "반경 150m 안 유동인구 셀 수 중앙값", f"{fpat['cells_in_radius_median']:.0f}개")
     sens = r["sensitivity"]
     cfg = r["cfg"]
     for rad in (100.0, 200.0):
         s = sens[(sens["radius_m"] == rad) & (sens["tau"] == cfg.tau) & (sens["signal_variant"] == cfg.signal)]
         if len(s):
-            add(15, f"반경 {rad:.0f}m: 150m 대비 탑승확률 순위 상관 / 위험 top10 겹침",
+            add("유동인구", f"반경 {rad:.0f}m: 150m 대비 탑승확률 순위 상관 / 위험 top10 겹침",
                 f"{s['spearman_vs_ref'].iloc[0]:.2f} / {s['top10_overlap_vs_ref'].iloc[0]:.0%}")
-    add(15, "같은 18시라도 정류장·요일에 따른 유동인구 최대/최소", f"{fpat['max_ratio_18h']:.1f}배")
+    add("유동인구", "같은 18시라도 정류장·요일에 따른 유동인구 최대/최소", f"{fpat['max_ratio_18h']:.1f}배")
     di = fpat["dow_index"]
-    for kind, q in deck["stops"].items():
+    for kind, q in rep["stops"].items():
         if q in di.index:
             wk = di.loc[q, ["mon", "tue", "wed", "thu", "fri"]].mean()
-            add(15, f"[{kind}] {label_map.get(q, q)} 주말(토·일) 평균 vs 평일 평균",
+            add("유동인구", f"[{kind}] {label_map.get(q, q)} 주말(토·일) 평균 vs 평일 평균",
                 f"{(di.loc[q, ['sat', 'sun']].mean() / wk - 1):+.0%}")
-            add(15, f"[{kind}] {label_map.get(q, q)} 토요일 vs 평일 평균", f"{(di.loc[q, 'sat'] / wk - 1):+.0%}")
+            add("유동인구", f"[{kind}] {label_map.get(q, q)} 토요일 vs 평일 평균", f"{(di.loc[q, 'sat'] / wk - 1):+.0%}")
             hsh = fpat["hour_share"].loc[q]
-            add(15, f"[{kind}] {label_map.get(q, q)} 유동인구 피크 시간", f"{int(hsh.idxmax())}시 ({hsh.max():.1%})")
-    # 16
+            add("유동인구", f"[{kind}] {label_map.get(q, q)} 유동인구 피크 시간", f"{int(hsh.idxmax())}시 ({hsh.max():.1%})")
+    # 정류장 대기 수요
     sc, we_sc, sdow = r["model_scored"], r["model_scored_weekend"], r["scored_by_dow"]
 
     def ratio(d, seqs=None, hours=None, col="latent_daily"):
@@ -459,86 +492,87 @@ def _deck_numbers(r: dict, label_map: dict) -> pd.DataFrame:
         return d[col].sum() / d["flow_day"].sum() if len(d) else np.nan
     st = "station_demand_daily"
     r_wd18, r_sat18 = ratio(sc, [focus], [18], st), ratio(sdow["sat"], [focus], [18], st)
-    add(16, f"{fl} 평일 18시 대기 비율(정류장 대기 수요 ÷ 유동인구)", f"{r_wd18:.1%}")
-    add(16, f"{fl} 평일 18시 대기 비율 ÷ 토요일 18시", f"{r_wd18 / r_sat18:.1f}배" if r_sat18 > 0 else "-")
-    add(16, "유동인구 중 정류장 대기 수요 비율 (서울 도심, 평일 / 주말)", f"{ratio(sc, col=st):.1%} / {ratio(we_sc, col=st):.1%}")
+    add("정류장 대기 수요", f"{fl} 평일 18시 대기 비율(정류장 대기 수요 ÷ 유동인구)", f"{r_wd18:.1%}")
+    add("정류장 대기 수요", f"{fl} 평일 18시 대기 비율 ÷ 토요일 18시", f"{r_wd18 / r_sat18:.1f}배" if r_sat18 > 0 else "-")
+    add("정류장 대기 수요", "유동인구 중 정류장 대기 수요 비율 (서울 도심, 평일 / 주말)", f"{ratio(sc, col=st):.1%} / {ratio(we_sc, col=st):.1%}")
     skt = sc[sc["has_skt"] & (sc["n_buses"] > 0)]
     con = skt[~skt["unconstrained"]]
     m = r["model"]
-    add(16, "만석 도착 칸 / 전체 칸 (정류장 x 요일 x 시간대, 운행·유동인구 있는 칸)",
+    add("정류장 대기 수요", "만석 도착 칸 / 전체 칸 (정류장 x 요일 x 시간대, 운행·유동인구 있는 칸)",
         f"{m.n_full} / {m.n_cells} ({m.n_full / max(m.n_cells, 1):.0%})")
-    add(16, "기준 대기 비율 (정류장 대기 수요 ÷ 유동인구, 배수 평균일 때)", f"{np.exp(m.base):.1%}")
+    add("정류장 대기 수요", "기준 대기 비율 (정류장 대기 수요 ÷ 유동인구, 배수 평균일 때)", f"{np.exp(m.base):.1%}")
     if con["daily_boarding"].sum() > 0:
-        add(16, "[평일] 만석 칸 복원 대기 수요 ÷ 승차 기록", f"{con['latent_daily'].sum() / con['daily_boarding'].sum() - 1:+.0%}")
-    # 17
-    add(17, "유동인구 중 9401 대기 수요 비율 (서울 도심, 평일 / 주말)", f"{ratio(sc):.2%} / {ratio(we_sc):.2%}")
+        add("정류장 대기 수요", "[평일] 만석 칸 복원 대기 수요 ÷ 승차 기록", f"{con['latent_daily'].sum() / con['daily_boarding'].sum() - 1:+.0%}")
+    # 9401 점유율
+    add("9401 점유율", "유동인구 중 9401 대기 수요 비율 (서울 도심, 평일 / 주말)", f"{ratio(sc):.2%} / {ratio(we_sc):.2%}")
     q = r.get("card_quality", {})
-    add(17, "통합: 다른 정산사업자 정류장ID 수 / 통합 ID로 연결된 승차 비율",
+    add("9401 점유율", "통합: 다른 정산사업자 정류장ID 수 / 통합 ID로 연결된 승차 비율",
         f"{q.get('통합한_정류장ID_수', 0)}개 / {q.get('통합ID로_연결된_승차_비율', 0):.1%}")
     dg = r["diag"]
     if dg.get("n_share_cells"):
-        add(17, "점유율 대체 칸 (정류장 x 요일 x 시간대): 소수 칸 / 만석 도착 칸 / 전체",
+        add("9401 점유율", "점유율 대체 칸 (정류장 x 요일 x 시간대): 소수 칸 / 만석 도착 칸 / 전체",
             f"{dg['n_share_few']} / {dg['n_share_full']} / {dg['n_share_cells']}")
     sh = r.get("share")
     if sh is not None:
         s0 = sh.drop_duplicates("seq").set_index("seq").reindex(seoul)
         multi = int((s0["n_routes"] >= 2).sum())
-        add(17, "서울 도심 정류장 중 복수 노선 정차", f"{multi} / {len(seoul)}개")
+        add("9401 점유율", "서울 도심 정류장 중 복수 노선 정차", f"{multi} / {len(seoul)}개")
         if s0["n_routes"].notna().any():
             q = int(s0["n_routes"].idxmax())
             s18 = sh[(sh["seq"] == q) & (sh["hour"] == 18)]["share_weekday"]
-            add(17, f"정차 노선이 가장 많은 {label_map.get(q, q)}: 노선 수 / 평일 18시 9401 점유율",
+            add("9401 점유율", f"정차 노선이 가장 많은 {label_map.get(q, q)}: 노선 수 / 평일 18시 9401 점유율",
                 f"{int(s0.at[q, 'n_routes'])}개 / {pct(float(s18.iloc[0])) if len(s18) else '-'}")
     pk = sc[sc["has_skt"] & sc["hour"].isin([17, 18, 19])].groupby("seq")["latent_daily"].sum()
     if len(pk):
-        add(17, "평일 퇴근(17~19시) 9401 대기 수요가 가장 많은 정류장", label_map.get(int(pk.idxmax()), ""))
+        add("9401 점유율", "평일 퇴근(17~19시) 9401 대기 수요가 가장 많은 정류장", label_map.get(int(pk.idxmax()), ""))
     f18 = sc[(sc["seq"] == focus) & (sc["hour"] == 18)]
     if len(f18) and f18["flow_day"].iloc[0] > 0:
         v = f18.iloc[0]
-        add(17, f"{fl} 평일 18시 단계별 축소 (유동인구 = 100)",
+        add("9401 점유율", f"{fl} 평일 18시 단계별 축소 (유동인구 = 100)",
             f"100 -> 정류장 대기 수요 {v['station_demand_daily'] / v['flow_day'] * 100:.1f} -> 9401 대기 수요 {v['latent_daily'] / v['flow_day'] * 100:.1f}"
             f" (참고: 실제 9401 승차 {v['daily_boarding'] / v['flow_day'] * 100:.1f})")
-    # 18
+    # 모델 검증
     for k, v in r.get("validation", {}).items():
-        add(18, k, f"{v:.0%}" if isinstance(v, float) and ("률" in k or "WAPE" in k) else v)
+        add("모델 검증", k, f"{v:.0%}" if isinstance(v, float) and ("률" in k or "WAPE" in k) else v)
     ds = r["demand_sens"]
     for _, row in ds[ds["수요배율"] != 1.0].iterrows():
-        add(18, f"수요 x{row['수요배율']:.1f}: 위험 top10 유지", f"{row['위험top10_겹침']:.0%}")
-    # 19
+        add("모델 검증", f"수요 x{row['수요배율']:.1f}: 위험 top10 유지", f"{row['위험top10_겹침']:.0%}")
+    # 위험 칸
     out_seqs = [q for q in seoul if r["geom"].at[q, "direction"] == "out"]
     p18 = sc[(sc["hour"] == 18)].set_index("seq")["p_board_mid"]
     if out_seqs:
-        add(19, f"평일 18시 탑승확률: 성남 방향 첫 정류장 {label_map.get(out_seqs[0])} -> {fl}",
+        add("위험 칸", f"평일 18시 탑승확률: 성남 방향 첫 정류장 {label_map.get(out_seqs[0])} -> {fl}",
             f"{pct(p18.get(out_seqs[0], np.nan))} -> {pct(p18.get(focus, np.nan))}")
     w18 = sc[(sc["hour"] == 18)].set_index("seq")["wait_total_min"]
     if out_seqs:
-        add(19, f"평일 18시 기대 대기: 성남 방향 첫 정류장 {label_map.get(out_seqs[0])} -> {fl}",
+        add("위험 칸", f"평일 18시 기대 대기: 성남 방향 첫 정류장 {label_map.get(out_seqs[0])} -> {fl}",
             f"{w18.get(out_seqs[0], np.nan):.0f}분 -> {w18.get(focus, np.nan):.0f}분")
-    add(19, "토요일 기대 대기가 가장 긴 시간", f"{deck['sat_worst']}시")
+    add("위험 칸", "토요일 기대 대기가 가장 긴 시간", f"{rep['sat_worst']}시")
     fh = {k: d[(d["seq"] == focus) & d["hour"].between(6, 23)].set_index("hour")["wait_total_min"] for k, d in sdow.items()}
     tw = pd.concat([fh[k] for k in ("tue", "wed", "thu")], axis=1).mean(axis=1).dropna()
     if len(tw):
         h = int(tw.idxmax())
-        add(19, f"{fl} 화~목 최장 기대 대기", f"{tw.max():.0f}분 ({h}시)")
-        add(19, f"{fl} 금요일 같은 시간 기대 대기", f"{fh['fri'].get(h, np.nan):.0f}분")
+        add("위험 칸", f"{fl} 화~목 최장 기대 대기", f"{tw.max():.0f}분 ({h}시)")
+        add("위험 칸", f"{fl} 금요일 같은 시간 기대 대기", f"{fh['fri'].get(h, np.nan):.0f}분")
     wke = pd.concat([fh["sat"], fh["sun"]], axis=1).max(axis=1).dropna()
     if len(wke):
-        add(19, f"{fl} 주말 최장 기대 대기", f"{wke.max():.0f}분 ({int(wke.idxmax())}시)")
+        add("위험 칸", f"{fl} 주말 최장 기대 대기", f"{wke.max():.0f}분 ({int(wke.idxmax())}시)")
     allc = _risk_rank(sdow, seoul)
     if len(allc):
         w = allc.iloc[0]
-        add(19, "가장 위험한 칸 (기대 대기가 가장 긴 칸)",
+        add("위험 칸", "가장 위험한 칸 (기대 대기가 가장 긴 칸)",
             f"{label_map.get(int(w['seq']))} {DOW_KR[w['dow']]} {int(w['hour'])}시, 기대 대기 {w['wait_total_min']:.0f}분, 확률 {pct(w['p_board_mid'])}")
-        add(19, "그 칸 최악(상위 10%): 보내는 버스 / 대기", f"{w['missed_buses_p90']:.0f}대 / {w['wait_p90_min']:.0f}분")
+        add("위험 칸", "그 칸 최악(상위 10%): 보내는 버스 / 대기", f"{w['missed_buses_p90']:.0f}대 / {w['wait_p90_min']:.0f}분")
+    # 회피 가능성
     av = r.get("avoid")
     if av is not None and len(av):
         b = av[av["기본가정"]].iloc[0] if av["기본가정"].any() else av.iloc[0]
-        add("회피", "회피 가능한 탑승 실패 비율 (가정 9가지 범위)", f"{av['회피가능_비율'].min():.0%} ~ {av['회피가능_비율'].max():.0%}")
-        add("회피", f"기본 가정 (S={b['단축기준_분(S)']:.0f}분, ±{b['시각조정범위_분(W)']:.0f}분): 회피 가능 / 정류장 변경 / 시각 조정",
+        add("회피 가능성", "회피 가능한 탑승 실패 비율 (가정 9가지 범위)", f"{av['회피가능_비율'].min():.0%} ~ {av['회피가능_비율'].max():.0%}")
+        add("회피 가능성", f"기본 가정 (S={b['단축기준_분(S)']:.0f}분, ±{b['시각조정범위_분(W)']:.0f}분): 회피 가능 / 정류장 변경 / 시각 조정",
             f"{b['회피가능_비율']:.0%} / {b['정류장변경_가능_비율']:.0%} / {b['시각조정_가능_비율']:.0%}")
-        add("회피", "기본 가정: 정류장 변경 시 단축 / 시각 조정 시 대기 감소 (중앙값)",
+        add("회피 가능성", "기본 가정: 정류장 변경 시 단축 / 시각 조정 시 대기 감소 (중앙값)",
             f"{b['정류장변경_단축_중앙값_분']:.0f}분 / {b['시각조정_대기감소_중앙값_분']:.0f}분")
-    return pd.DataFrame(rows, columns=["장표", "항목", "값"]).astype(str)
+    return pd.DataFrame(rows, columns=["구분", "항목", "값"]).astype(str)
 
 
 # %%
@@ -562,7 +596,7 @@ def write_manifest(out_dir: Path, manifest: list) -> None:
         ("그림 - 탑승가능확률·미승차", lambda p: any(p.startswith(f"figures/F{n}") for n in ("1B", "2", "8", "9", "10", "11", "12"))),
         ("그림 - 검증", lambda p: any(p.startswith(f"figures/F{n}") for n in ("3", "4", "5", "7"))),
         ("그림 - 서비스", lambda p: any(p.startswith(f"figures/F{n}") for n in ("6", "13", "14", "15", "16"))),
-        ("그림 - 장표용 (파일 이름 숫자 = 장표 쪽)", lambda p: p.startswith("figures/S")),
+        ("그림 - 요약", lambda p: p.startswith("figures/S")),
     ]
     used = set()
     for title, match in sections:
@@ -582,7 +616,7 @@ def write_manifest(out_dir: Path, manifest: list) -> None:
 def export_all(r: dict, out_dir: Path, m09) -> None:
     (out_dir / "tables").mkdir(parents=True, exist_ok=True)
     (out_dir / "figures").mkdir(parents=True, exist_ok=True)
-    # 이전 실행에서 남은 표/그림 지우기 (이름이 바뀐 옛 파일이 반출에 섞이지 않게)
+    # 이전 실행에서 남은 표·그림 삭제 (이름이 바뀐 옛 파일이 섞이지 않게)
     for old in list((out_dir / "tables").glob("*.csv")) + list((out_dir / "figures").glob("*.png")):
         old.unlink()
     manifest: list = []

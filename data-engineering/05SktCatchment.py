@@ -67,7 +67,7 @@ def load_skt(path: Path, std_ym: str | None = None) -> pd.DataFrame:
 
 def _sum_within_radius(stops: pd.DataFrame, cells: pd.DataFrame, value_cols: list[str], radius_m: float):
     """정류장마다 반경 안 셀들의 값 합계. 반환: (정류장별 셀 개수, 정류장 x 컬럼 합계)"""
-    pad = radius_m + 1  # 정류장 근처 네모 밖 셀은 미리 버림 (서울 전체 셀과 거리를 다 재면 느림)
+    pad = radius_m + 1  # 정류장 주변 사각형 밖의 셀은 미리 제외 (계산 시간 단축)
     in_box = (cells["utmk_x"].between(stops["utmk_x"].min() - pad, stops["utmk_x"].max() + pad)
               & cells["utmk_y"].between(stops["utmk_y"].min() - pad, stops["utmk_y"].max() + pad))
     cells = cells[in_box]
