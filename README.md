@@ -32,14 +32,12 @@
 ## 구성
 | 파일 | 내용 |
 |---|---|
-| RunAll.py | 01~10 일괄 실행, 데이터 경로·분석 설정(CONFIG) |
 | data-engineering/01RouteStops.py | 9401 노선ID, 정류장 순서·좌표·방향, 가상 정류장 제외, 정류장ID 통합 |
 | data-engineering/02CardExtract.py | 교통카드에서 9401 기록, 정류장별 전체 노선 승차, 정류장 간 이동 추출 (저장·재사용) |
 | data-engineering/03BusEvents.py | 버스 한 대씩 정류장 도착 시각·재차·앞차와의 간격 |
 | data-engineering/04LoadProfile.py | 정류장 x 시간대 하루 평균(평일·주말·요일), 9401 점유율, 정류장 대기 수요 |
 | data-engineering/05SktCatchment.py | 정류장 반경 SKT 유동인구 합산 |
 | data-engineering/06BuildFeatures.py | 정류장 x 시간대 표로 합치기 (서울 도심 구간) |
-| data-engineering/MakeDummyRaw.py | 점검용 가짜 데이터 생성 |
 | modeling/07BoardingProbability.py | 수요 복원(체류 목적 보정) + 줄 서기로 탑승확률·기대 대기 시간 |
 | modeling/08Validate.py | 교차검증, 포화 곡선, 민감도, 몰림 효과, 재현 오차·시간 분할 검증 |
 | modeling/09ServiceRecommend.py | 정류장 추천, 위치 기반 추천, 회피 가능성, 대기 시간 부담 |
